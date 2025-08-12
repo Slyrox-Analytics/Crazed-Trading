@@ -1,6 +1,11 @@
 
 import streamlit as st, plotly.graph_objects as go
-from utils import ensure_state, BotConfig, price_to_grid_levels, rebuild_grid_orders, simulate_next_price, current_price, realized_unrealized, process_fills
+from streamlit_autorefresh import st_autorefresh
+from utils import (
+    ensure_state, BotConfig, price_to_grid_levels, rebuild_grid_orders,
+    simulate_next_price, current_price, realized_unrealized, process_fills,
+    insight_expected_tp_pnl
+)
 
 st.set_page_config(page_title="Bot-Demo", page_icon="🤖", layout="wide")
 ensure_state(st)
@@ -20,6 +25,7 @@ cfg.range_min = c5.number_input("Range Min", min_value=10.0, value=60000.0, step
 cfg.range_max = c6.number_input("Range Max", min_value=20.0, value=64000.0, step=10.0, format="%.2f")
 cfg.step_shift = st.slider("Grid verschieben (Stepgröße)", 1.0, 1000.0, 50.0, step=1.0)
 
+# Controls
 cA, cB, cC, cD, cE = st.columns([1,1,1,1,1])
 if cA.button("Start", type="primary"):
     st.bot["running"] = True
@@ -37,25 +43,49 @@ if cD.button("Grid ⬇️"):
 if cE.button("Rebuild Grid"):
     rebuild_grid_orders(st)
 
-cT1, cT2 = st.columns([1,1])
-if cT1.button("➡️ Nächster Tick"):
-    new = simulate_next_price(st, vol=0.0012)
-    if st.bot["running"]:
+# Auto-tick toggle
+with st.container():
+    tick_col, btn_col = st.columns([1,1])
+    auto = tick_col.toggle("Auto-Tick (läuft auch am Handy)", value=True,
+                           help="Simuliert Preisbewegung automatisch in Intervallen.")
+    if auto and st.bot["running"]:
+        st_autorefresh(interval=1200, limit=None, key="auto_tick_bot")
+        new = simulate_next_price(st, vol=0.0012)
         process_fills(st, new)
+    else:
+        if btn_col.button("➡️ Nächster Tick (manuell)"):
+            new = simulate_next_price(st, vol=0.0012)
+            if st.bot["running"]:
+                process_fills(st, new)
+
 price = current_price(st)
 
+# Chart
 levels = price_to_grid_levels(cfg)
 fig = go.Figure()
 fig.add_trace(go.Scatter(y=st.price_series["price"], x=list(range(len(st.price_series))), mode="lines", name="Preis"))
 for L in levels:
     fig.add_hline(y=float(L), line_dash="dot", line_width=1, opacity=0.6)
 fig.add_hline(y=price, line_width=2, line_dash="solid", annotation_text=f"Price {price:.2f}", annotation_position="right")
-
 fig.update_layout(height=450, margin=dict(l=10,r=10,t=30,b=10), template="plotly_dark")
 st.plotly_chart(fig, use_container_width=True)
 
 r, u = realized_unrealized(st)
-st.metric("Realized PnL", f"{r:,.2f}")
-st.metric("Unrealized PnL", f"{u:,.2f}")
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Preis", f"{price:,.2f}")
+m2.metric("Realized PnL", f"{r:,.2f}")
+m3.metric("Unrealized PnL", f"{u:,.2f}")
+m4.metric("Open Position", f"{st.bot['position_size']:.4f}")
+
+insight = insight_expected_tp_pnl(st)
+if insight:
+    st.markdown("### Nächste Grid-TP Vorschau")
+    st.table({
+        "Avg Entry":[f"{insight['avg_entry']:.2f}"],
+        "Next TP":[f"{insight['next_tp']:.2f}"],
+        "Distance":[f"{insight['distance']:.2f}"],
+        "Qty":[f"{insight['qty']:.4f}"],
+        "Expected PnL (after fees)":[f"{insight['expected_pnl_at_tp']:.2f}"]
+    })
 
 st.caption("**Hinweis:** In dieser Demo sind Fees & Positions vereinfacht. Fill-Logik: Cross bei Grid-Linie.")
