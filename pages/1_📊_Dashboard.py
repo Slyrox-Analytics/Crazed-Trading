@@ -1,6 +1,7 @@
 
 import streamlit as st
 import plotly.graph_objects as go
+from streamlit.components.v1 import html
 from utils import ensure_state, current_price, fetch_btc_spot_multi, push_price, update_equity
 
 st.set_page_config(page_title="Dashboard", page_icon="📊", layout="wide")
@@ -14,9 +15,15 @@ use_live = c1.toggle("Echter BTC-Preis", value=True)
 auto = c2.toggle("Auto-Refresh", value=True)
 ms = st.slider("Refresh (ms)", 1200, 5000, 2000, step=100)
 
-# Soft refresh — no page rerun, no scroll jump
+st.markdown("### TradingView-Chart (Beta)")
+tv_on = st.toggle("Chart anzeigen", value=True)
+cc1, cc2, cc3 = st.columns([2,1,1])
+symbol = cc1.text_input("Symbol", value="BINANCE:BTCUSDT")
+tf = cc2.selectbox("Timeframe", ["1", "3", "5", "15", "30", "60", "120", "240", "D", "W"], index=2)
+h = cc3.slider("Höhe (px)", 300, 900, 420, step=10)
+
 placeholder = st.empty()
-loops = 1 if not auto else 8  # draw a few steps per run
+loops = 1 if not auto else 8
 
 for _ in range(loops):
     if use_live:
@@ -41,5 +48,30 @@ for _ in range(loops):
         with m3:
             st.metric("Unrealized PnL", f"{u:,.2f}")
 
+        if tv_on:
+            tv = f'''
+<div class="tradingview-widget-container">
+  <div id="tvchart"></div>
+  <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+  <script type="text/javascript">
+    new TradingView.widget({{
+      "autosize": true,
+      "symbol": "{symbol}",
+      "interval": "{tf}",
+      "timezone": "Etc/UTC",
+      "theme": "dark",
+      "style": "1",
+      "locale": "de_DE",
+      "hide_top_toolbar": false,
+      "hide_legend": false,
+      "save_image": false,
+      "container_id": "tvchart"
+    }});
+  </script>
+</div>
+'''
+            html(tv, height=h, scrolling=False)
+
     import time
-    if auto: time.sleep(ms/1000.0)
+    if auto:
+        time.sleep(ms/1000.0)

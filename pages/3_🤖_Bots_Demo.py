@@ -1,6 +1,7 @@
 
-import time
+import time, random
 import streamlit as st, plotly.graph_objects as go
+from streamlit.components.v1 import html
 from utils import (
     ensure_state, BotConfig, price_to_grid_levels, rebuild_grid_orders,
     simulate_next_price, current_price, realized_unrealized, process_fills,
@@ -36,10 +37,10 @@ with st.expander("⚙️ Schnell anpassen"):
         rebuild_grid_orders(st.session_state)
         st.success("Grid um aktuellen Preis zentriert.")
 
-# Controls row
 cA, cB, cC, cD, cE, cF, cG, cH, cI = st.columns([1,1,1,1,1,1.2,1.2,1.2,1.4])
 if cA.button("Start", type="primary"):
     st.session_state.bot["running"] = True
+    st.session_state["scroll_to_chart"] = True
     rebuild_grid_orders(st.session_state)
 if cB.button("Stop"):
     st.session_state.bot["running"] = False
@@ -49,7 +50,6 @@ if cD.button("Grid ⬇️"):
     d = cfg.step_shift; cfg.range_min -= d; cfg.range_max -= d; rebuild_grid_orders(st.session_state)
 if cE.button("Rebuild Grid"):
     rebuild_grid_orders(st.session_state)
-
 if cF.button("Tick (1x)"):
     simulate_next_price(st.session_state, vol=0.0015); process_fills(st.session_state, current_price(st.session_state))
 if cG.button("10 Ticks"):
@@ -57,26 +57,23 @@ if cG.button("10 Ticks"):
 if cH.button("100 Ticks"):
     for _ in range(100): simulate_next_price(st.session_state, vol=0.0035); process_fills(st.session_state, current_price(st.session_state))
 if cI.button("⚡ Force Cross (Demo-PnL)"):
-    # garantiert Aktivität (ein Cross sofort, nächster Cycle schließt ggf. TP)
     force_cross_nearest(st.session_state, "down" if cfg.side != "Short" else "up")
     process_fills(st.session_state, current_price(st.session_state))
 
-# Live / refresh
-t0, t1, t2 = st.columns([1,1,2])
+t0, t1, t2, t3 = st.columns([1,1,2,1])
 use_live = t0.toggle("Echter BTC-Preis", value=True, key="live_toggle")
 auto = t1.toggle("Auto-Update (soft)", value=True)
 refresh = t2.slider("Refresh (ms)", 1200, 5000, 2500, step=100)
+auto_fill = t3.toggle("Auto-Fill (Demo)", value=False, help="Erzwingt gelegentlich Fills, damit PnL sichtbar wird.")
 
-# Status pill
 status = "RUNNING" if st.session_state.bot.get("running") else "PAUSED"
 bg = "#21c36f" if status == "RUNNING" else "#555"
 st.markdown(f'<div style="margin-top:-10px;margin-bottom:8px"><span style="padding:4px 8px;border-radius:8px;background:{bg};color:white;font-weight:600">Status: {status}</span></div>', unsafe_allow_html=True)
 
-# ---- Soft update loop (keine Seiten-Neu-Ladung, daher kein Scroll-Jump) ----
 placeholder = st.empty()
 cycles = 1 if not (auto and st.session_state.bot["running"]) else 12
 
-for _ in range(cycles):
+for i in range(cycles):
     if use_live:
         px, src = fetch_btc_spot_multi()
         if px is not None:
@@ -85,6 +82,9 @@ for _ in range(cycles):
     else:
         simulate_next_price(st.session_state, vol=0.0015)
 
+    if st.session_state.bot["running"] and auto_fill and random.random() < 0.15:
+        force_cross_nearest(st.session_state, "down" if cfg.side != "Short" else "up")
+
     if st.session_state.bot["running"]:
         process_fills(st.session_state, current_price(st.session_state))
 
@@ -92,7 +92,8 @@ for _ in range(cycles):
     equity, r, u = update_equity(st.session_state)
 
     with placeholder.container():
-        # metrics + spark
+        st.markdown('<div id="chart-anchor"></div>', unsafe_allow_html=True)
+
         price_series = st.session_state.price_series.tail(250)["price"]
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Preis", f"{price:,.2f}")
@@ -105,7 +106,6 @@ for _ in range(cycles):
         st.plotly_chart(spark, use_container_width=True)
         st.caption(f"Live-Quelle: {st.session_state.get('last_live_src','…')}")
 
-        # Chart with grids
         levels = list(price_to_grid_levels(cfg))
         mid = (cfg.range_min + cfg.range_max) / 2.0
         if cfg.side == "Long":
@@ -130,5 +130,13 @@ for _ in range(cycles):
                       annotation_text=f"Price {price:.2f}", annotation_position="right")
         fig.update_layout(height=520, margin=dict(l=10,r=10,t=30,b=10))
         st.plotly_chart(fig, use_container_width=True)
+
+        if st.session_state.get("scroll_to_chart"):
+            html("""<script>
+                const el = document.getElementById('chart-anchor');
+                if (el) { el.scrollIntoView({behavior:'smooth', block:'start'}); }
+            </script>""", height=0)
+            st.session_state["scroll_to_chart"] = False
+
     if cycles > 1:
         time.sleep(refresh/1000.0)
