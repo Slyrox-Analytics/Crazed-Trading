@@ -4,7 +4,7 @@ from streamlit_autorefresh import st_autorefresh
 from utils import (
     ensure_state, BotConfig, price_to_grid_levels, rebuild_grid_orders,
     simulate_next_price, current_price, realized_unrealized, process_fills,
-    insight_expected_tp_pnl, update_equity
+    insight_expected_tp_pnl, update_equity, fetch_btc_spot, push_price
 )
 
 st.set_page_config(page_title="Bot-Demo", page_icon="🤖", layout="wide")
@@ -18,7 +18,7 @@ col1, col2, col3, col4 = st.columns(4)
 cfg.side = col1.selectbox("Richtung", ["Long","Short","Neutral"], index=2)
 cfg.margin = col2.number_input("Margin (USDT)", min_value=1000.0, value=100000.0, step=1000.0)
 cfg.leverage = col3.slider("Leverage", 1, 125, 10)
-cfg.grid_count = col4.slider("Grids", 4, 40, 8)
+cfg.grid_count = col4.slider("Grids", 4, 60, 12)
 
 c5, c6 = st.columns(2)
 cfg.range_min = c5.number_input("Range Min", min_value=10.0, value=60000.0, step=10.0, format="%.2f")
@@ -43,20 +43,30 @@ if cD.button("Grid ⬇️"):
 if cE.button("Rebuild Grid"):
     rebuild_grid_orders(st.session_state)
 
-# Auto-tick toggle + interval
-t1, t2, t3 = st.columns([1,1,2])
+# Live price toggle + Auto-tick
+t0, t1, t2, t3 = st.columns([1,1,1,2])
+use_live = t0.toggle("Echter BTC-Preis", value=True, help="Binance Spot BTCUSDT")
 auto = t1.toggle("Auto-Tick", value=True, help="Simuliert Preisbewegung automatisch in Intervallen.")
 interval = t2.slider("Intervall (ms)", 800, 4000, 1500, step=100)
+
 if auto and st.session_state.bot["running"]:
     st_autorefresh(interval=interval, limit=None, key="auto_tick_bot")
-    new = simulate_next_price(st.session_state, vol=0.0012)
+    if use_live:
+        px_live = fetch_btc_spot()
+        new = push_price(st.session_state, px_live if px_live is not None else current_price(st.session_state))
+    else:
+        new = simulate_next_price(st.session_state, vol=0.0012)
     process_fills(st.session_state, new)
 elif t3.button("➡️ Nächster Tick (manuell)"):
-    new = simulate_next_price(st.session_state, vol=0.0012)
+    if use_live:
+        px_live = fetch_btc_spot()
+        new = push_price(st.session_state, px_live if px_live is not None else current_price(st.session_state))
+    else:
+        new = simulate_next_price(st.session_state, vol=0.0012)
     if st.session_state.bot["running"]:
         process_fills(st.session_state, new)
 
-# Metrics FIRST
+# Metrics + sparkline
 price = current_price(st.session_state)
 equity, r, u = update_equity(st.session_state)
 m1, m2, m3, m4 = st.columns(4)
@@ -65,6 +75,48 @@ m2.metric("Equity (USDT)", f"{equity:,.2f}")
 m3.metric("Realized PnL", f"{r:,.2f}")
 m4.metric("Unrealized PnL", f"{u:,.2f}")
 
+st.line_chart(st.session_state.price_series.tail(120), y="price", height=120)
+
+# Visibility options
+with st.container():
+    left, right = st.columns([1,2])
+    sync = left.toggle("Anzeige folgt Modus", value=True)
+    if sync:
+        show_long = cfg.side in ["Long","Neutral"]
+        show_short = cfg.side in ["Short","Neutral"]
+    else:
+        cL, cS = right.columns(2)
+        show_long = cL.checkbox("Long-Grids anzeigen", value=True)
+        show_short = cS.checkbox("Short-Grids anzeigen", value=False)
+
+# Chart with distinct styles + midline
+levels = list(price_to_grid_levels(cfg))
+mid = (cfg.range_min + cfg.range_max) / 2.0
+long_levels = [float(L) for L in levels if L < mid] if show_long else []
+short_levels = [float(L) for L in levels if L > mid] if show_short else []
+
+fig = go.Figure()
+fig.add_trace(go.Scatter(
+    y=st.session_state.price_series["price"],
+    x=list(range(len(st.session_state.price_series))),
+    mode="lines",
+    name="Preis",
+    line=dict(width=2)
+))
+fig.add_hline(y=mid, line=dict(color="#aaaaaa", width=1, dash="dash"), annotation_text="Mid", annotation_position="right")
+for L in long_levels:
+    fig.add_hline(y=L, line=dict(color="#00ff88", width=1.8, dash="solid"),
+                  annotation_text="Long", annotation_position="right")
+for L in short_levels:
+    fig.add_hline(y=L, line=dict(color="#ff4d4d", width=1.8, dash="dot"),
+                  annotation_text="Short", annotation_position="right")
+fig.add_hline(y=price, line=dict(color="#ffd700", width=2.8, dash="solid"),
+              annotation_text=f"Price {price:.2f}", annotation_position="right")
+
+fig.update_layout(height=470, margin=dict(l=10,r=10,t=30,b=10))
+st.plotly_chart(fig, use_container_width=True)
+
+# TP preview
 insight = insight_expected_tp_pnl(st.session_state)
 with st.expander("Nächste Grid-TP Vorschau", expanded=True):
     if insight:
@@ -77,43 +129,6 @@ with st.expander("Nächste Grid-TP Vorschau", expanded=True):
         })
     else:
         st.info("Kein aktiver Avg Entry – warte auf den ersten Fill.")
-
-# Chart with distinct styles: Long (green solid), Short (red dot), Price (yellow)
-levels = list(price_to_grid_levels(cfg))
-mid = (cfg.range_min + cfg.range_max) / 2.0
-
-# Determine long/short groups depending on side
-long_levels = []
-short_levels = []
-if cfg.side == "Long":
-    long_levels = [float(L) for L in levels if L < mid]
-elif cfg.side == "Short":
-    short_levels = [float(L) for L in levels if L > mid]
-else:
-    long_levels = [float(L) for L in levels if L < mid]
-    short_levels = [float(L) for L in levels if L > mid]
-
-fig = go.Figure()
-fig.add_trace(go.Scatter(
-    y=st.session_state.price_series["price"],
-    x=list(range(len(st.session_state.price_series))),
-    mode="lines",
-    name="Preis",
-    line=dict(width=2)
-))
-
-for L in long_levels:
-    fig.add_hline(y=L, line=dict(color="#00ff88", width=1.8, dash="solid"),
-                  annotation_text="Long", annotation_position="right")
-for L in short_levels:
-    fig.add_hline(y=L, line=dict(color="#ff4d4d", width=1.8, dash="dot"),
-                  annotation_text="Short", annotation_position="right")
-
-fig.add_hline(y=price, line=dict(color="#ffd700", width=2.8, dash="solid"),
-              annotation_text=f"Price {price:.2f}", annotation_position="right")
-
-fig.update_layout(height=460, margin=dict(l=10,r=10,t=30,b=10))
-st.plotly_chart(fig, use_container_width=True)
 
 # Quick views
 with st.expander("Offene Orders", expanded=False):
@@ -128,4 +143,4 @@ with st.expander("Logs", expanded=False):
     else:
         st.caption("Noch keine Logs.")
 
-st.caption("Legende: Long-Grids = grün/solid • Short-Grids = rot/dot • Preis = gelb")
+st.caption("Legende: Long-Grids = grün/solid • Short-Grids = rot/dot • Mid = grau/dash • Preis = gelb")
