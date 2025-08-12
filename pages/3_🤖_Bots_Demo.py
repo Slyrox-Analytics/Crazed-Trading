@@ -40,21 +40,27 @@ if cD.button("Grid ⬇️"):
 if cE.button("Rebuild Grid"):
     rebuild_grid_orders(st.session_state)
 
-# Live + Refresh setup (decoupled from Auto-Tick)
-t0, t1, t2, t3 = st.columns([1,1,1,2])
+# Live / refresh & pause toggle
+t0, t1, t2, t3 = st.columns([1,1,1,1])
 use_live = t0.toggle("Echter BTC-Preis", value=True)
-auto_tick = t1.toggle("Auto-Tick (Sim)", value=False, help="Nur für Simulation nötig")
-refresh = t2.slider("Refresh (ms)", 800, 4000, 1800, step=100)
+pause = t1.toggle("Updates pausieren", value=False, help="Deaktiviert Auto-Refresh, damit du in Ruhe scrollen kannst.")
+auto_sim = t2.toggle("Simulationsticker", value=False, help="Nur für Demo ohne Live erforderlich.")
+refresh = t3.slider("Refresh (ms)", 800, 4000, 1800, step=100)
 
-if use_live or auto_tick:
+# Neutral behaviour mode
+st.session_state.bot["neutral_static"] = st.radio(
+    "Neutral-Modus", ["Statisch (um Mid, wie Bitget manuell)","Dynamisch (preisabhängig)"],
+    index=0, horizontal=True
+) == "Statisch (um Mid, wie Bitget manuell)"
+
+if (use_live or auto_sim) and not pause:
     st_autorefresh(interval=refresh, limit=None, key="live_refresh")
     if use_live:
         px, src = fetch_btc_spot_multi()
         push_price(st.session_state, px if px is not None else current_price(st.session_state))
         if px is not None: st.session_state.last_live_src = src
-    elif auto_tick:
+    elif auto_sim:
         simulate_next_price(st.session_state, vol=0.0012)
-
     if st.session_state.bot["running"]:
         process_fills(st.session_state, current_price(st.session_state))
 
@@ -67,29 +73,25 @@ m2.metric("Equity (USDT)", f"{equity:,.2f}")
 m3.metric("Realized PnL", f"{r:,.2f}")
 m4.metric("Unrealized PnL", f"{u:,.2f}")
 
-# Sparkline
 y = st.session_state.price_series.tail(120)["price"]
 spark = go.Figure(go.Scatter(y=y, mode="lines", line=dict(width=2)))
 spark.update_layout(height=110, margin=dict(l=0,r=0,t=0,b=0))
 st.plotly_chart(spark, use_container_width=True)
 st.caption(f"Live-Quelle: {st.session_state.get('last_live_src', '…')}")
 
-# Tabs
 tab_chart, tab_orders, tab_logs = st.tabs(["📈 Chart", "📜 Orders", "🧾 Logs"])
-
 with tab_chart:
     levels = list(price_to_grid_levels(cfg))
     mid = (cfg.range_min + cfg.range_max) / 2.0
 
-    # Determine which levels are Long/Short exactly like orders
     if cfg.side == "Long":
-        long_levels = [float(L) for L in levels if L <= mid]
+        long_levels = [float(L) for L in levels if L < mid]  # reiner Long unter Mid
         short_levels = []
     elif cfg.side == "Short":
         long_levels = []
-        short_levels = [float(L) for L in levels if L >= mid]
+        short_levels = [float(L) for L in levels if L > mid]  # reiner Short über Mid
     else:
-        buy_levels, sell_levels = neutral_split_levels(cfg, price)
+        buy_levels, sell_levels = neutral_split_levels(cfg, price, st.session_state.bot.get("neutral_static", True))
         long_levels = buy_levels
         short_levels = sell_levels
 
@@ -101,7 +103,6 @@ with tab_chart:
         name="Preis",
         line=dict(width=2)
     ))
-    # draw all longs & shorts
     for L in long_levels:
         fig.add_hline(y=L, line=dict(color="#00ff88", width=1.8, dash="solid"),
                       annotation_text="Lo", annotation_position="right")
