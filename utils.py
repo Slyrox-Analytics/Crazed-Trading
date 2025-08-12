@@ -53,19 +53,38 @@ def rebuild_grid_orders(st):
     levels = price_to_grid_levels(cfg)
     orders = []
     mid = (cfg.range_min + cfg.range_max)/2.0
-    for L in levels:
-        if cfg.side == "Long":
+    px = current_price(st)
+
+    if cfg.side == "Long":
+        # alle Levels unter der Mitte sind Buy-Limits
+        for L in levels:
             if L < mid:
                 orders.append({"type":"buy_limit","price":float(L),"qty":cfg.qty_per_order})
-        elif cfg.side == "Short":
+    elif cfg.side == "Short":
+        # alle Levels über der Mitte sind Sell-Limits
+        for L in levels:
             if L > mid:
                 orders.append({"type":"sell_limit","price":float(L),"qty":cfg.qty_per_order})
-        else:
-            if L < mid:
-                orders.append({"type":"buy_limit","price":float(L),"qty":cfg.qty_per_order})
-            elif L > mid:
-                orders.append({"type":"sell_limit","price":float(L),"qty":cfg.qty_per_order})
+    else:
+        # Neutral → Verteilung abhängig von der Preisposition in der Range (Bitget-like)
+        rng = max(1e-9, (cfg.range_max - cfg.range_min))
+        ratio = (px - cfg.range_min) / rng  # 0..1
+        N = int(cfg.grid_count)
+        buy_count = max(1, min(N-1, round(N * ratio)))
+        sell_count = N - buy_count
+
+        # untere Niveaus = Buys (buy_count Stück), obere = Sells (sell_count Stück)
+        sorted_levels = sorted(levels)
+        buy_levels = sorted_levels[:buy_count]
+        sell_levels = sorted_levels[-sell_count:] if sell_count > 0 else []
+
+        for L in buy_levels:
+            orders.append({"type":"buy_limit","price":float(L),"qty":cfg.qty_per_order})
+        for L in sell_levels:
+            orders.append({"type":"sell_limit","price":float(L),"qty":cfg.qty_per_order})
+
     st.bot["open_orders"] = orders
+
 
 def process_fills(st, new_price):
     cfg: BotConfig = st.bot["config"]
