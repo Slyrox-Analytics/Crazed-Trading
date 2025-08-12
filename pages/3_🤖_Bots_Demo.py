@@ -4,7 +4,7 @@ from streamlit_autorefresh import st_autorefresh
 from utils import (
     ensure_state, BotConfig, price_to_grid_levels, rebuild_grid_orders,
     simulate_next_price, current_price, realized_unrealized, process_fills,
-    insight_expected_tp_pnl
+    insight_expected_tp_pnl, update_equity
 )
 
 st.set_page_config(page_title="Bot-Demo", page_icon="🤖", layout="wide")
@@ -43,49 +43,62 @@ if cD.button("Grid ⬇️"):
 if cE.button("Rebuild Grid"):
     rebuild_grid_orders(st.session_state)
 
-# Auto-tick toggle
-with st.container():
-    tick_col, btn_col = st.columns([1,1])
-    auto = tick_col.toggle("Auto-Tick (läuft auch am Handy)", value=True,
-                           help="Simuliert Preisbewegung automatisch in Intervallen.")
-    if auto and st.session_state.bot["running"]:
-        st_autorefresh(interval=1200, limit=None, key="auto_tick_bot")
-        new = simulate_next_price(st.session_state, vol=0.0012)
+# Auto-tick toggle + interval
+t1, t2, t3 = st.columns([1,1,2])
+auto = t1.toggle("Auto-Tick", value=True, help="Simuliert Preisbewegung automatisch in Intervallen.")
+interval = t2.slider("Intervall (ms)", 800, 4000, 1500, step=100)
+if auto and st.session_state.bot["running"]:
+    st_autorefresh(interval=interval, limit=None, key="auto_tick_bot")
+    new = simulate_next_price(st.session_state, vol=0.0012)
+    process_fills(st.session_state, new)
+elif t3.button("➡️ Nächster Tick (manuell)"):
+    new = simulate_next_price(st.session_state, vol=0.0012)
+    if st.session_state.bot["running"]:
         process_fills(st.session_state, new)
-    else:
-        if btn_col.button("➡️ Nächster Tick (manuell)"):
-            new = simulate_next_price(st.session_state, vol=0.0012)
-            if st.session_state.bot["running"]:
-                process_fills(st.session_state, new)
 
+# Metrics FIRST so du siehst sie ohne Scrollen
 price = current_price(st.session_state)
-
-# Chart
-levels = price_to_grid_levels(cfg)
-fig = go.Figure()
-fig.add_trace(go.Scatter(y=st.session_state.price_series["price"], x=list(range(len(st.session_state.price_series))), mode="lines", name="Preis"))
-for L in levels:
-    fig.add_hline(y=float(L), line_dash="dot", line_width=1, opacity=0.6)
-fig.add_hline(y=price, line_width=2, line_dash="solid", annotation_text=f"Price {price:.2f}", annotation_position="right")
-fig.update_layout(height=450, margin=dict(l=10,r=10,t=30,b=10), template="plotly_dark")
-st.plotly_chart(fig, use_container_width=True)
-
-r, u = realized_unrealized(st.session_state)
+equity, r, u = update_equity(st.session_state)
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Preis", f"{price:,.2f}")
-m2.metric("Realized PnL", f"{r:,.2f}")
-m3.metric("Unrealized PnL", f"{u:,.2f}")
-m4.metric("Open Position", f"{st.session_state.bot['position_size']:.4f}")
+m2.metric("Equity (USDT)", f"{equity:,.2f}")
+m3.metric("Realized PnL", f"{r:,.2f}")
+m4.metric("Unrealized PnL", f"{u:,.2f}")
 
 insight = insight_expected_tp_pnl(st.session_state)
-if insight:
-    st.markdown("### Nächste Grid-TP Vorschau")
-    st.table({
-        "Avg Entry":[f"{insight['avg_entry']:.2f}"],
-        "Next TP":[f"{insight['next_tp']:.2f}"],
-        "Distance":[f"{insight['distance']:.2f}"],
-        "Qty":[f"{insight['qty']:.4f}"],
-        "Expected PnL (after fees)":[f"{insight['expected_pnl_at_tp']:.2f}"]
-    })
+with st.expander("Nächste Grid-TP Vorschau", expanded=True):
+    if insight:
+        st.table({
+            "Avg Entry":[f"{insight['avg_entry']:.2f}"],
+            "Next TP":[f"{insight['next_tp']:.2f}"],
+            "Distance":[f"{insight['distance']:.2f}"],
+            "Qty":[f"{insight['qty']:.4f}"],
+            "Expected PnL (after fees)":[f"{insight['expected_pnl_at_tp']:.2f}"]
+        })
+    else:
+        st.info("Kein aktiver Avg Entry – warte auf den ersten Fill.")
 
-st.caption("**Hinweis:** In dieser Demo sind Fees & Positions vereinfacht. Fill-Logik: Cross bei Grid-Linie.")
+# Chart (Grid-Linien mit klarer Farbe)
+levels = price_to_grid_levels(cfg)
+fig = go.Figure()
+fig.add_trace(go.Scatter(y=st.session_state.price_series["price"], x=list(range(len(st.session_state.price_series))), mode="lines", name="Preis", line=dict(width=2)))
+for L in levels:
+    fig.add_hline(y=float(L), line_dash="dot", line_width=1.5, opacity=0.9, line_color="#00ff88")
+fig.add_hline(y=price, line_width=2, line_dash="solid", line_color="#ff4b4b", annotation_text=f"Price {price:.2f}", annotation_position="right")
+fig.update_layout(height=460, margin=dict(l=10,r=10,t=30,b=10))
+st.plotly_chart(fig, use_container_width=True)
+
+# Quick views without leaving page
+with st.expander("Offene Orders", expanded=False):
+    if st.session_state.bot["open_orders"]:
+        st.dataframe(st.session_state.bot["open_orders"], use_container_width=True, hide_index=True)
+    else:
+        st.caption("Keine offenen Orders.")
+with st.expander("Logs", expanded=False):
+    if st.session_state.logs:
+        for line in st.session_state.logs[::-1]:
+            st.write("•", line)
+    else:
+        st.caption("Noch keine Logs.")
+
+st.caption("**Hinweis:** Autorefresh verursacht ein kurzes Springen der Seite. Metrics & TP-Vorschau stehen deshalb oben.")
