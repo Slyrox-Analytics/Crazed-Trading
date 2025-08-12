@@ -1,0 +1,11 @@
+
+<style>
+.stApp {
+  background: radial-gradient(1200px 600px at 20% 10%, rgba(0,255,120,0.05), transparent),
+              radial-gradient(1000px 500px at 80% 20%, rgba(0,255,120,0.05), transparent),
+              linear-gradient(180deg, #0a0f0d 0%, #070b0a 100%);
+}
+:root { --accent: #00ff88; }
+h1, h2, h3 { letter-spacing: .5px; }
+.block-container { padding-top: 1.6rem; }
+</style>
