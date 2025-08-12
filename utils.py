@@ -58,7 +58,6 @@ def fetch_btc_spot_multi():
         pass
     return None, "offline"
 
-# Optional candles (for Dashboard fallback)
 def fetch_candles(symbol: str="BTCUSDT", interval: str="5m", limit: int=200):
     try:
         url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
@@ -89,7 +88,6 @@ def neutral_split_levels(cfg: BotConfig, price: float, static: bool):
     if static:
         longs = [float(L) for L in levels if L < mid - eps]
         shorts = [float(L) for L in levels if L > mid + eps]
-        # mid (wenn ungerade) -> Short, damit volle Linienzahl sichtbar
         if len(levels) % 2 == 1:
             mid_val = levels[len(levels)//2]
             if abs(mid_val - mid) < eps*10 + 1e-6: shorts.append(float(mid_val))
@@ -100,12 +98,11 @@ def neutral_split_levels(cfg: BotConfig, price: float, static: bool):
         return longs, shorts
 
 def rebuild_grid_orders(st):
-    # nur Info; Linien werden dynamisch gezeichnet
     st.bot["open_orders"] = [{"level": float(L)} for L in price_to_grid_levels(st.bot["config"])]
     st.logs.append(f"{pd.Timestamp.utcnow()}: Grid rebuilt.")
 
 def _crossed(prev: float, now: float, level: float, is_buy: bool) -> bool:
-    '''True wenn Preis das Level in richtige Richtung kreuzt (Buy: von oben nach unten, Sell: unten nach oben).'''
+    # Buy-cross: von oben nach unten. Sell-cross: von unten nach oben.
     if is_buy:
         return prev > level >= now
     else:
@@ -117,7 +114,6 @@ def process_fills(st, price: float):
     prev = float(st.price_series.iloc[-2]["price"])
     step = _grid_step(cfg)
 
-    # Levels entsprechend Modus
     levels = list(price_to_grid_levels(cfg))
     mid = (cfg.range_min + cfg.range_max) / 2.0
     if cfg.side == "Long":
@@ -127,11 +123,9 @@ def process_fills(st, price: float):
         long_levels = []
         short_levels = [float(L) for L in levels if L > mid]
     else:
-        # dynamisch um Preis herum
         long_levels = [float(L) for L in levels if L < price]
         short_levels = [float(L) for L in levels if L > price]
 
-    # Eröffnungen
     for L in long_levels:
         if _crossed(prev, price, L, is_buy=True):
             st.bot["open_trades"].append({"side":"long","entry":L,"tp":L+step,"qty":QTY_PER_ORDER})
@@ -141,7 +135,6 @@ def process_fills(st, price: float):
             st.bot["open_trades"].append({"side":"short","entry":S,"tp":S-step,"qty":QTY_PER_ORDER})
             st.logs.append(f"{pd.Timestamp.utcnow()}: SHORT filled @ {S:.2f} → TP {S-step:.2f}")
 
-    # Schließungen (TP)
     still_open = []
     realized = st.bot.get("realized", 0.0)
     for t in st.bot["open_trades"]:
@@ -178,3 +171,23 @@ def update_equity(st):
     r,u = realized_unrealized(st)
     eq = st.bot["config"].margin + r + u
     return eq, r, u
+
+# ---- helpers to guarantee action (for demo) ----
+import numpy as _np
+def nearest_level(cfg: BotConfig, price: float):
+    levels = _np.array(price_to_grid_levels(cfg))
+    idx = int(_np.argmin(_np.abs(levels - price)))
+    return float(levels[idx])
+
+def force_cross_nearest(st, direction: str):
+    cfg: BotConfig = st.bot["config"]
+    p = current_price(st)
+    level = nearest_level(cfg, p)
+    eps = max(0.01, (cfg.range_max - cfg.range_min) * 1e-6)
+    if direction == "down":
+        # cross from above to below that level
+        push_price(st, max(10.0, level + 2*eps))
+        push_price(st, max(10.0, level - 2*eps))
+    else:
+        push_price(st, max(10.0, level - 2*eps))
+        push_price(st, max(10.0, level + 2*eps))
