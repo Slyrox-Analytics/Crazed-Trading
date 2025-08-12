@@ -11,16 +11,6 @@ from utils import (
 st.set_page_config(page_title="Bot-Demo", page_icon="🤖", layout="wide")
 ensure_state(st.session_state)
 
-# --- keep scroll position across reruns (so autorefresh doesn't jump to top) ---
-components.html('''
-<script>
-  const key = "scrollY_bot_demo";
-  const saved = sessionStorage.getItem(key);
-  if (saved !== null) { window.scrollTo(0, parseInt(saved)); }
-  setInterval(() => { sessionStorage.setItem(key, window.scrollY); }, 250);
-</script>
-''', height=0)
-
 st.markdown("## 🤖 Bot-Demo (ohne API)")
 st.caption("Erstelle einen Demo-Bot. Grid-Linien sichtbar. Range & Grids live anpassbar.")
 
@@ -36,8 +26,19 @@ cfg.range_min = c5.number_input("Range Min", min_value=10.0, value=60000.0, step
 cfg.range_max = c6.number_input("Range Max", min_value=20.0, value=64000.0, step=10.0, format="%.2f")
 cfg.step_shift = st.slider("Grid verschieben (Stepgröße)", 1.0, 1000.0, 50.0, step=1.0)
 
+# Optional: Center grid around current price
+with st.expander("⚙️ Schnell anpassen"):
+    w = st.slider("Breite um Preis (%)", 1, 20, 6, help="Spanne rund um den aktuellen Preis")
+    if st.button("Center Grid auf Preis", use_container_width=True):
+        p = current_price(st.session_state)
+        span = p * (w/100)
+        cfg.range_min = round(p - span/2, 2)
+        cfg.range_max = round(p + span/2, 2)
+        rebuild_grid_orders(st.session_state)
+        st.success("Grid um aktuellen Preis zentriert.")
+
 # Controls row
-cA, cB, cC, cD, cE, cF = st.columns([1,1,1,1,1,2])
+cA, cB, cC, cD, cE, cF, cG, cH = st.columns([1,1,1,1,1,1.5,1.2,1.2])
 if cA.button("Start", type="primary", key="start_btn"):
     st.session_state.bot["running"] = True
     if not st.session_state.bot.get("open_orders"):
@@ -50,17 +51,37 @@ if cD.button("Grid ⬇️", key="grid_down"):
     d = cfg.step_shift; cfg.range_min -= d; cfg.range_max -= d; rebuild_grid_orders(st.session_state)
 if cE.button("Rebuild Grid", key="rebuild"):
     rebuild_grid_orders(st.session_state)
-# manual tick
-if cF.button("⏭️ Nächster Tick (manuell)", key="manual_tick"):
-    simulate_next_price(st.session_state, vol=0.0012)
-    process_fills(st.session_state, current_price(st.session_state))
+# manual ticks
+if cF.button("⏭️ Tick (1x)", key="tick1"):
+    simulate_next_price(st.session_state, vol=0.0012); process_fills(st.session_state, current_price(st.session_state))
+if cG.button("⏭️ 10 Ticks", key="tick10"):
+    for _ in range(10): simulate_next_price(st.session_state, vol=0.0015); process_fills(st.session_state, current_price(st.session_state))
+if cH.button("⏭️ 100 Ticks", key="tick100"):
+    for _ in range(100): simulate_next_price(st.session_state, vol=0.002); process_fills(st.session_state, current_price(st.session_state))
 
-# Live / refresh & pause toggle
-t0, t1, t2, t3 = st.columns([1,1,1,1])
+# Live / refresh controls
+t0, t1, t2, t3, t4 = st.columns([1,1,1,1,1])
 use_live = t0.toggle("Echter BTC-Preis", value=True, key="live_toggle")
 pause = t1.toggle("Updates pausieren", value=False, help="Bei AUS wird automatisch aktualisiert.", key="pause_toggle")
 auto_sim = t2.toggle("Simulationsticker", value=False, help="Nur für Demo ohne Live erforderlich.", key="sim_toggle")
 refresh = t3.slider("Refresh (ms)", 800, 4000, 1800, step=100, key="refresh_ms")
+stick_chart = t4.toggle("Anzeige folgt Chart", value=True, help="Hält die Sicht automatisch beim Chart", key="stick_chart")
+
+# --- Scroll handling (Stick to chart & restore position) ---
+components.html(f'''
+<div id="chart_anchor"></div>
+<script>
+  const key = "scrollY_bot_demo";
+  const saved = sessionStorage.getItem(key);
+  if (saved !== null) {{ window.scrollTo(0, parseInt(saved)); }}
+  setInterval(() => {{ sessionStorage.setItem(key, window.scrollY); }}, 120);
+  const stick = {str(stick_chart).lower()};
+  if (stick) {{
+     const el = document.getElementById('chart_anchor');
+     if (el) el.scrollIntoView({{behavior: "instant", block: "start"}});
+  }}
+</script>
+''', height=0)
 
 # Neutral behaviour mode
 is_static = st.radio(
@@ -99,7 +120,7 @@ m2.metric("Equity (USDT)", f"{equity:,.2f}")
 m3.metric("Realized PnL", f"{r:,.2f}")
 m4.metric("Unrealized PnL", f"{u:,.2f}")
 
-y = st.session_state.price_series.tail(120)["price"]
+y = st.session_state.price_series.tail(200)["price"]
 spark = go.Figure(go.Scatter(y=y, mode="lines", line=dict(width=2)))
 spark.update_layout(height=110, margin=dict(l=0,r=0,t=0,b=0))
 st.plotly_chart(spark, use_container_width=True)
@@ -121,11 +142,10 @@ with tab_chart:
             eps = max(1e-9, (cfg.range_max - cfg.range_min) * 1e-9)
             base_long = [float(L) for L in levels if L < mid - eps]
             base_short = [float(L) for L in levels if L > mid + eps]
-            # include exact mid if grid_count is odd: default => to Short
             if len(levels) % 2 == 1:
                 mid_val = levels[len(levels)//2]
                 if abs(mid_val - mid) < eps*10 + 1e-6:
-                    base_short.append(float(mid_val))
+                    base_short.append(float(mid_val))  # default mid -> Short
             long_levels, short_levels = base_long, base_short
         else:
             buy_levels, sell_levels = neutral_split_levels(cfg, price, False)
