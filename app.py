@@ -5,7 +5,7 @@ from utils import ensure_state
 st.set_page_config(page_title="Crazed-Trading", page_icon="💹", layout="wide")
 
 st.markdown(Path("assets/custom.css").read_text(), unsafe_allow_html=True)
-ensure_state(st)
+ensure_state(st.session_state)
 
 col_logo, col_title = st.columns([1,3])
 with col_logo:
