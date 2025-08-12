@@ -2,6 +2,7 @@
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass
+import requests
 
 @dataclass
 class BotConfig:
@@ -31,7 +32,6 @@ def ensure_state(st):
     if "logs" not in st:
         st.logs = []
     if "equity_series" not in st:
-        # start with starting equity = margin
         st.equity_series = pd.DataFrame({"equity":[st.bot["config"].margin]})
 
 def current_price(st):
@@ -44,8 +44,23 @@ def simulate_next_price(st, vol=0.002):
     st.price_series.loc[len(st.price_series)] = new
     return new
 
+def fetch_btc_spot():
+    """Simple BTCUSDT spot price from Binance public API (no key)."""
+    try:
+        r = requests.get("https://api.binance.com/api/v3/ticker/price", params={"symbol":"BTCUSDT"}, timeout=3)
+        r.raise_for_status()
+        return float(r.json()["price"])
+    except Exception:
+        return None
+
+def push_price(st, new_price: float):
+    if new_price is not None:
+        st.price_series.loc[len(st.price_series)] = float(new_price)
+        return float(new_price)
+    return None
+
 def price_to_grid_levels(cfg: BotConfig):
-    levels = np.linspace(cfg.range_min, cfg.range_max, cfg.grid_count)
+    levels = np.linspace(cfg.range_min, cfg.range_max, int(cfg.grid_count))
     return levels
 
 def rebuild_grid_orders(st):
@@ -56,35 +71,29 @@ def rebuild_grid_orders(st):
     px = current_price(st)
 
     if cfg.side == "Long":
-        # alle Levels unter der Mitte sind Buy-Limits
         for L in levels:
             if L < mid:
                 orders.append({"type":"buy_limit","price":float(L),"qty":cfg.qty_per_order})
     elif cfg.side == "Short":
-        # alle Levels über der Mitte sind Sell-Limits
         for L in levels:
             if L > mid:
                 orders.append({"type":"sell_limit","price":float(L),"qty":cfg.qty_per_order})
     else:
-        # Neutral → Verteilung abhängig von der Preisposition in der Range (Bitget-like)
+        # Neutral → Bitget-like split based on price position within range
         rng = max(1e-9, (cfg.range_max - cfg.range_min))
         ratio = (px - cfg.range_min) / rng  # 0..1
         N = int(cfg.grid_count)
         buy_count = max(1, min(N-1, round(N * ratio)))
         sell_count = N - buy_count
-
-        # untere Niveaus = Buys (buy_count Stück), obere = Sells (sell_count Stück)
         sorted_levels = sorted(levels)
         buy_levels = sorted_levels[:buy_count]
         sell_levels = sorted_levels[-sell_count:] if sell_count > 0 else []
-
         for L in buy_levels:
             orders.append({"type":"buy_limit","price":float(L),"qty":cfg.qty_per_order})
         for L in sell_levels:
             orders.append({"type":"sell_limit","price":float(L),"qty":cfg.qty_per_order})
 
     st.bot["open_orders"] = orders
-
 
 def process_fills(st, new_price):
     cfg: BotConfig = st.bot["config"]
@@ -114,7 +123,7 @@ def process_fills(st, new_price):
             exit_price = od["price"]
             qty = cfg.qty_per_order
             if st.bot["position_size"]>0 and st.bot["avg_entry"] is not None:
-                pnl = (exit_price - st.bot["avg_entry"])*qty
+                pnl = (exit_price - st.bot["avg_entry"]) * qty
                 fee = (exit_price + st.bot["avg_entry"]) * qty * cfg.fee_rate
                 pnl -= fee
                 st.bot["pnl_realized"] += pnl
@@ -160,7 +169,7 @@ def realized_unrealized(st):
     px = current_price(st)
     upnl = 0.0
     if st.bot["position_size"] and st.bot["avg_entry"]:
-        upnl = (px - st.bot["avg_entry"])*st.bot["position_size"]
+        upnl = (px - st.bot["avg_entry"]) * st.bot["position_size"]
     return st.bot["pnl_realized"], upnl
 
 def update_equity(st):
