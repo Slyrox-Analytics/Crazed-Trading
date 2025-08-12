@@ -4,7 +4,7 @@ from utils import ensure_state, current_price, simulate_next_price, realized_unr
 from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title="Dashboard", page_icon="📊", layout="wide")
-ensure_state(st)
+ensure_state(st.session_state)
 
 left, right = st.columns([1,1])
 
@@ -14,14 +14,14 @@ with left:
     live = st.toggle("Live-Modus (Auto-Refresh)", value=True, help="Simuliert Live-Kurs via Random Walk.")
     if live:
         st_autorefresh(interval=1200, limit=None, key="auto_refresh_dash")
-        px = simulate_next_price(st, vol=0.0008)
+        px = simulate_next_price(st.session_state, vol=0.0008)
     else:
         if st.button("➡️ Nächster Tick", use_container_width=True):
-            px = simulate_next_price(st, vol=0.0008)
+            px = simulate_next_price(st.session_state, vol=0.0008)
         else:
-            px = current_price(st)
+            px = current_price(st.session_state)
     st.button(f"💸 Aktueller Kurs: **{px:,.2f}**", use_container_width=True)
-    r, u = realized_unrealized(st)
+    r, u = realized_unrealized(st.session_state)
     st.metric("Realized PnL", f"{r:,.2f}")
     st.metric("Unrealized PnL", f"{u:,.2f}")
 

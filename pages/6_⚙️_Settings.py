@@ -2,12 +2,12 @@
 import streamlit as st
 from utils import ensure_state, BotConfig
 st.set_page_config(page_title="Settings", page_icon="⚙️", layout="wide")
-ensure_state(st)
+ensure_state(st.session_state)
 
 st.markdown("## ⚙️ Settings")
 st.caption("Baseline-Parameter & Darstellung (Demo).")
 
-cfg: BotConfig = st.bot["config"]
+cfg: BotConfig = st.session_state.bot["config"]
 st.json({
     "side": cfg.side,
     "margin": cfg.margin,
