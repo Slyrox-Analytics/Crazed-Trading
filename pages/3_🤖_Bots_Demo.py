@@ -4,14 +4,14 @@ from streamlit_autorefresh import st_autorefresh
 from utils import (
     ensure_state, BotConfig, price_to_grid_levels, rebuild_grid_orders,
     simulate_next_price, current_price, realized_unrealized, process_fills,
-    insight_expected_tp_pnl, update_equity, fetch_btc_spot, push_price
+    insight_expected_tp_pnl, update_equity, fetch_btc_spot_multi, push_price
 )
 
 st.set_page_config(page_title="Bot-Demo", page_icon="🤖", layout="wide")
 ensure_state(st.session_state)
 
 st.markdown("## 🤖 Bot-Demo (ohne API)")
-st.caption("Erstelle einen Demo-Bot. **Grid-Linien sichtbar**. Range & Grids während des Laufens anpassbar.")
+st.caption("Erstelle einen Demo-Bot. Grid-Linien sichtbar. Range & Grids live anpassbar.")
 
 cfg: BotConfig = st.session_state.bot["config"]
 col1, col2, col3, col4 = st.columns(4)
@@ -45,22 +45,30 @@ if cE.button("Rebuild Grid"):
 
 # Live price toggle + Auto-tick
 t0, t1, t2, t3 = st.columns([1,1,1,2])
-use_live = t0.toggle("Echter BTC-Preis", value=True, help="Binance Spot BTCUSDT")
-auto = t1.toggle("Auto-Tick", value=True, help="Simuliert Preisbewegung automatisch in Intervallen.")
+use_live = t0.toggle("Echter BTC-Preis", value=True, help="Probiert mehrere Börsen (Binance, Bitstamp, Coinbase)")
+auto = t1.toggle("Auto-Tick", value=True)
 interval = t2.slider("Intervall (ms)", 800, 4000, 1500, step=100)
 
-if auto and st.session_state.bot["running"]:
+# Always update price series when auto or button, even if bot not running
+if auto:
     st_autorefresh(interval=interval, limit=None, key="auto_tick_bot")
     if use_live:
-        px_live = fetch_btc_spot()
+        px_live, src = fetch_btc_spot_multi()
         new = push_price(st.session_state, px_live if px_live is not None else current_price(st.session_state))
+        if px_live is not None:
+            st.session_state.last_live_ts = True
+            st.session_state.last_live_src = src
     else:
         new = simulate_next_price(st.session_state, vol=0.0012)
-    process_fills(st.session_state, new)
+    if st.session_state.bot["running"]:
+        process_fills(st.session_state, new)
 elif t3.button("➡️ Nächster Tick (manuell)"):
     if use_live:
-        px_live = fetch_btc_spot()
+        px_live, src = fetch_btc_spot_multi()
         new = push_price(st.session_state, px_live if px_live is not None else current_price(st.session_state))
+        if px_live is not None:
+            st.session_state.last_live_ts = True
+            st.session_state.last_live_src = src
     else:
         new = simulate_next_price(st.session_state, vol=0.0012)
     if st.session_state.bot["running"]:
@@ -74,10 +82,16 @@ m1.metric("Preis", f"{price:,.2f}")
 m2.metric("Equity (USDT)", f"{equity:,.2f}")
 m3.metric("Realized PnL", f"{r:,.2f}")
 m4.metric("Unrealized PnL", f"{u:,.2f}")
-
 st.line_chart(st.session_state.price_series.tail(120), y="price", height=120)
 
-# Visibility options
+# Info badge about source
+src = st.session_state.get("last_live_src", None)
+if use_live:
+    st.caption(f"Live-Quelle: {src or '…versuche Börsen nacheinander'}")
+else:
+    st.caption("Quelle: Simulation (Random Walk)")
+
+# Grid visibility
 with st.container():
     left, right = st.columns([1,2])
     sync = left.toggle("Anzeige folgt Modus", value=True)
@@ -89,7 +103,7 @@ with st.container():
         show_long = cL.checkbox("Long-Grids anzeigen", value=True)
         show_short = cS.checkbox("Short-Grids anzeigen", value=False)
 
-# Chart with distinct styles + midline
+# Chart
 levels = list(price_to_grid_levels(cfg))
 mid = (cfg.range_min + cfg.range_max) / 2.0
 long_levels = [float(L) for L in levels if L < mid] if show_long else []
@@ -142,5 +156,3 @@ with st.expander("Logs", expanded=False):
             st.write("•", line)
     else:
         st.caption("Noch keine Logs.")
-
-st.caption("Legende: Long-Grids = grün/solid • Short-Grids = rot/dot • Mid = grau/dash • Preis = gelb")
