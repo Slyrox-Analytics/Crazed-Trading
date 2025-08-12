@@ -10,17 +10,19 @@ ensure_state(st.session_state)
 st.markdown("# Dashboard")
 st.caption("Aktueller Kurs & PnL-Übersicht. Echtpreis optional (mehrere Quellen).")
 
-c1, c2 = st.columns(2)
-use_live = c1.toggle("Echter BTC-Preis", value=True)
-auto = c2.toggle("Auto-Refresh", value=True)
+row1 = st.columns(2)
+use_live = row1[0].toggle("Echter BTC-Preis", value=True)
+auto = row1[1].toggle("Auto-Refresh", value=True)
+
 ms = st.slider("Refresh (ms)", 1200, 5000, 2000, step=100)
 
 st.markdown("### TradingView-Chart (Beta)")
 tv_on = st.toggle("Chart anzeigen", value=True)
-cc1, cc2, cc3 = st.columns([2,1,1])
+cc1, cc2, cc3, cc4 = st.columns([2,1,1,1])
 symbol = cc1.text_input("Symbol", value="BINANCE:BTCUSDT")
-tf = cc2.selectbox("Timeframe", ["1", "3", "5", "15", "30", "60", "120", "240", "D", "W"], index=2)
-h = cc3.slider("Höhe (px)", 300, 900, 420, step=10)
+tf = cc2.selectbox("Timeframe", ["1","3","5","15","30","60","120","240","D","W"], index=2)
+h = cc3.slider("Höhe (px)", 300, 1200, 680, step=10)
+full = cc4.toggle("Fullscreen-Höhe (75vh)", value=False)
 
 placeholder = st.empty()
 loops = 1 if not auto else 8
@@ -49,9 +51,10 @@ for _ in range(loops):
             st.metric("Unrealized PnL", f"{u:,.2f}")
 
         if tv_on:
+            height_css = "75vh" if full else f"{h}px"
             tv = f'''
-<div class="tradingview-widget-container">
-  <div id="tvchart"></div>
+<div class="tradingview-widget-container" style="height:{height_css};">
+  <div id="tvchart" style="height:{height_css};"></div>
   <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
   <script type="text/javascript">
     new TradingView.widget({{
@@ -70,7 +73,7 @@ for _ in range(loops):
   </script>
 </div>
 '''
-            html(tv, height=h, scrolling=False)
+            html(tv, height=0, scrolling=False)
 
     import time
     if auto:
