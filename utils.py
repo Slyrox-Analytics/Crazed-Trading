@@ -2,19 +2,19 @@
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass
-import requests
+import requests, time
 
 @dataclass
 class BotConfig:
-    side: str = "Neutral"   # "Long", "Short", "Neutral"
+    side: str = "Neutral"
     margin: float = 100000.0
     leverage: int = 10
     grid_count: int = 8
     range_min: float = 60000.0
     range_max: float = 64000.0
-    step_shift: float = 50.0  # amount to shift grid up/down
-    fee_rate: float = 0.0006  # taker as simplification
-    qty_per_order: float = 0.001 # synthetic contract size
+    step_shift: float = 50.0
+    fee_rate: float = 0.0006
+    qty_per_order: float = 0.001
 
 def ensure_state(st):
     if "price_series" not in st:
@@ -33,6 +33,10 @@ def ensure_state(st):
         st.logs = []
     if "equity_series" not in st:
         st.equity_series = pd.DataFrame({"equity":[st.bot["config"].margin]})
+    if "last_live_ts" not in st:
+        st.last_live_ts = None
+    if "last_live_src" not in st:
+        st.last_live_src = None
 
 def current_price(st):
     return float(st.price_series["price"].iloc[-1])
@@ -44,14 +48,32 @@ def simulate_next_price(st, vol=0.002):
     st.price_series.loc[len(st.price_series)] = new
     return new
 
-def fetch_btc_spot():
-    """Simple BTCUSDT spot price from Binance public API (no key)."""
-    try:
-        r = requests.get("https://api.binance.com/api/v3/ticker/price", params={"symbol":"BTCUSDT"}, timeout=3)
-        r.raise_for_status()
-        return float(r.json()["price"])
-    except Exception:
-        return None
+# ---- Live price helpers ----
+def _fetch_binance():
+    r = requests.get("https://api.binance.com/api/v3/ticker/price", params={"symbol":"BTCUSDT"}, timeout=3)
+    r.raise_for_status()
+    return float(r.json()["price"]), "binance"
+
+def _fetch_bitstamp():
+    r = requests.get("https://www.bitstamp.net/api/v2/ticker/btcusd", timeout=3)
+    r.raise_for_status()
+    return float(r.json()["last"]), "bitstamp"
+
+def _fetch_coinbase():
+    r = requests.get("https://api.coinbase.com/v2/prices/BTC-USD/spot", timeout=3)
+    r.raise_for_status()
+    return float(r.json()["data"]["amount"]), "coinbase"
+
+LIVE_SOURCES = [_fetch_binance, _fetch_bitstamp, _fetch_coinbase]
+
+def fetch_btc_spot_multi():
+    for fn in LIVE_SOURCES:
+        try:
+            price, src = fn()
+            return price, src
+        except Exception:
+            continue
+    return None, None
 
 def push_price(st, new_price: float):
     if new_price is not None:
@@ -79,9 +101,8 @@ def rebuild_grid_orders(st):
             if L > mid:
                 orders.append({"type":"sell_limit","price":float(L),"qty":cfg.qty_per_order})
     else:
-        # Neutral → Bitget-like split based on price position within range
         rng = max(1e-9, (cfg.range_max - cfg.range_min))
-        ratio = (px - cfg.range_min) / rng  # 0..1
+        ratio = (px - cfg.range_min) / rng
         N = int(cfg.grid_count)
         buy_count = max(1, min(N-1, round(N * ratio)))
         sell_count = N - buy_count
@@ -113,7 +134,6 @@ def process_fills(st, new_price):
                 ps = abs(st.bot["position_size"] - cfg.qty_per_order)
                 st.bot["avg_entry"] = (pe*ps + entry*cfg.qty_per_order)/(ps+cfg.qty_per_order)
             st.logs.append(f"Buy filled @ {entry:.2f}")
-            # TP at next upper grid level
             idx = max(1, level_list.index(min(level_list, key=lambda x: abs(x-entry)))+1)
             if idx < len(level_list):
                 tp = level_list[idx]
