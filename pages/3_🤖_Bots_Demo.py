@@ -56,7 +56,7 @@ elif t3.button("➡️ Nächster Tick (manuell)"):
     if st.session_state.bot["running"]:
         process_fills(st.session_state, new)
 
-# Metrics FIRST so du siehst sie ohne Scrollen
+# Metrics FIRST
 price = current_price(st.session_state)
 equity, r, u = update_equity(st.session_state)
 m1, m2, m3, m4 = st.columns(4)
@@ -78,17 +78,44 @@ with st.expander("Nächste Grid-TP Vorschau", expanded=True):
     else:
         st.info("Kein aktiver Avg Entry – warte auf den ersten Fill.")
 
-# Chart (Grid-Linien mit klarer Farbe)
-levels = price_to_grid_levels(cfg)
+# Chart with distinct styles: Long (green solid), Short (red dot), Price (yellow)
+levels = list(price_to_grid_levels(cfg))
+mid = (cfg.range_min + cfg.range_max) / 2.0
+
+# Determine long/short groups depending on side
+long_levels = []
+short_levels = []
+if cfg.side == "Long":
+    long_levels = [float(L) for L in levels if L < mid]
+elif cfg.side == "Short":
+    short_levels = [float(L) for L in levels if L > mid]
+else:
+    long_levels = [float(L) for L in levels if L < mid]
+    short_levels = [float(L) for L in levels if L > mid]
+
 fig = go.Figure()
-fig.add_trace(go.Scatter(y=st.session_state.price_series["price"], x=list(range(len(st.session_state.price_series))), mode="lines", name="Preis", line=dict(width=2)))
-for L in levels:
-    fig.add_hline(y=float(L), line_dash="dot", line_width=1.5, opacity=0.9, line_color="#00ff88")
-fig.add_hline(y=price, line_width=2, line_dash="solid", line_color="#ff4b4b", annotation_text=f"Price {price:.2f}", annotation_position="right")
+fig.add_trace(go.Scatter(
+    y=st.session_state.price_series["price"],
+    x=list(range(len(st.session_state.price_series))),
+    mode="lines",
+    name="Preis",
+    line=dict(width=2)
+))
+
+for L in long_levels:
+    fig.add_hline(y=L, line=dict(color="#00ff88", width=1.8, dash="solid"),
+                  annotation_text="Long", annotation_position="right")
+for L in short_levels:
+    fig.add_hline(y=L, line=dict(color="#ff4d4d", width=1.8, dash="dot"),
+                  annotation_text="Short", annotation_position="right")
+
+fig.add_hline(y=price, line=dict(color="#ffd700", width=2.8, dash="solid"),
+              annotation_text=f"Price {price:.2f}", annotation_position="right")
+
 fig.update_layout(height=460, margin=dict(l=10,r=10,t=30,b=10))
 st.plotly_chart(fig, use_container_width=True)
 
-# Quick views without leaving page
+# Quick views
 with st.expander("Offene Orders", expanded=False):
     if st.session_state.bot["open_orders"]:
         st.dataframe(st.session_state.bot["open_orders"], use_container_width=True, hide_index=True)
@@ -101,4 +128,4 @@ with st.expander("Logs", expanded=False):
     else:
         st.caption("Noch keine Logs.")
 
-st.caption("**Hinweis:** Autorefresh verursacht ein kurzes Springen der Seite. Metrics & TP-Vorschau stehen deshalb oben.")
+st.caption("Legende: Long-Grids = grün/solid • Short-Grids = rot/dot • Preis = gelb")
