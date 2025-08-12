@@ -6,6 +6,7 @@ from utils import (
     simulate_next_price, current_price, realized_unrealized, process_fills,
     insight_expected_tp_pnl, update_equity, fetch_btc_spot_multi, push_price
 )
+import numpy as np
 
 st.set_page_config(page_title="Bot-Demo", page_icon="🤖", layout="wide")
 ensure_state(st.session_state)
@@ -49,9 +50,9 @@ use_live = t0.toggle("Echter BTC-Preis", value=True, help="Mehrere Quellen (Bina
 auto = t1.toggle("Auto-Tick", value=False, help="Aktiviere Autolauf (Scroll-Sprünge möglich)")
 interval = t2.slider("Intervall (ms)", 800, 4000, 2000, step=100)
 
-# Auto-fit range around price
+# Auto-fit range around price (default OFF to respect manual inputs)
 f1, f2 = st.columns([1,1])
-auto_fit = f1.toggle("Range auto an Preis anpassen", value=True)
+auto_fit = f1.toggle("Range auto an Preis anpassen", value=False)
 fit_width = f2.slider("Breite um Preis (%)", 1, 15, 5)
 
 # Tick logic (always update series on auto; manual via button)
@@ -85,6 +86,12 @@ m1.metric("Preis", f"{price:,.2f}")
 m2.metric("Equity (USDT)", f"{equity:,.2f}")
 m3.metric("Realized PnL", f"{r:,.2f}")
 m4.metric("Unrealized PnL", f"{u:,.2f}")
+
+# Sparkline (letzte 120 Punkte) direkt unter den Metriken
+y = st.session_state.price_series.tail(120)["price"]
+spark = go.Figure(go.Scatter(y=y, mode="lines", line=dict(width=2)))
+spark.update_layout(height=120, margin=dict(l=0,r=0,t=0,b=0))
+st.plotly_chart(spark, use_container_width=True)
 st.caption(f"Live-Quelle: {st.session_state.get('last_live_src', '…')}")
 
 # Tabs to avoid scroll jumps
@@ -100,13 +107,17 @@ with tab_chart:
 
     levels = list(price_to_grid_levels(cfg))
     mid = (cfg.range_min + cfg.range_max) / 2.0
-    show_long = cfg.side in ["Long","Neutral"]
-    show_short = cfg.side in ["Short","Neutral"]
-    long_levels = [float(L) for L in levels if L < mid] if show_long else []
-    short_levels = [float(L) for L in levels if L > mid] if show_short else []
+
+    # Draw ALL levels including the one at/closest to mid
+    epsilon = max(1e-9, (cfg.range_max - cfg.range_min) * 1e-6)
+    # Find index of level closest to mid:
+    mid_idx = int(np.argmin([abs(L - mid) for L in levels]))
+    mid_level = float(levels[mid_idx])
+
+    long_levels = [float(L) for i, L in enumerate(levels) if L < mid - epsilon or (i != mid_idx and cfg.side in ["Long","Neutral"] and L < mid)]
+    short_levels = [float(L) for i, L in enumerate(levels) if L > mid + epsilon or (i != mid_idx and cfg.side in ["Short","Neutral"] and L > mid)]
 
     fig = go.Figure()
-    # Sparkline + full series overlay
     fig.add_trace(go.Scatter(
         y=st.session_state.price_series["price"],
         x=list(range(len(st.session_state.price_series))),
@@ -114,13 +125,17 @@ with tab_chart:
         name="Preis",
         line=dict(width=2)
     ))
-    fig.add_hline(y=mid, line=dict(color="#aaaaaa", width=1, dash="dash"), annotation_text="Mid", annotation_position="right")
+    # midline (if it's exactly one of the grid levels, highlight it)
+    fig.add_hline(y=mid_level, line=dict(color="#00d1ff", width=2, dash="dash"),
+                  annotation_text="Mid grid", annotation_position="right")
+
     for L in long_levels:
         fig.add_hline(y=L, line=dict(color="#00ff88", width=1.8, dash="solid"),
                       annotation_text="Long", annotation_position="right")
     for L in short_levels:
         fig.add_hline(y=L, line=dict(color="#ff4d4d", width=1.8, dash="dot"),
                       annotation_text="Short", annotation_position="right")
+
     fig.add_hline(y=price, line=dict(color="#ffd700", width=2.8, dash="solid"),
                   annotation_text=f"Price {price:.2f}", annotation_position="right")
     fig.update_layout(height=520, margin=dict(l=10,r=10,t=30,b=10))
