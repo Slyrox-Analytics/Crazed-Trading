@@ -22,14 +22,17 @@ def ensure_state(st):
         st.bot = {
             "config": BotConfig(),
             "running": False,
-            "open_orders": [],  # pending grid orders
-            "trades": [],       # executed trades
+            "open_orders": [],
+            "trades": [],
             "pnl_realized": 0.0,
             "position_size": 0.0,
             "avg_entry": None
         }
     if "logs" not in st:
         st.logs = []
+    if "equity_series" not in st:
+        # start with starting equity = margin
+        st.equity_series = pd.DataFrame({"equity":[st.bot["config"].margin]})
 
 def current_price(st):
     return float(st.price_series["price"].iloc[-1])
@@ -116,7 +119,6 @@ def next_tp_target(cfg: BotConfig, entry: float):
     return None
 
 def insight_expected_tp_pnl(st):
-    """Return distance to next TP and expected pnl if we close 1 grid at that TP."""
     cfg: BotConfig = st.bot["config"]
     if st.bot["avg_entry"] is None:
         return None
@@ -141,3 +143,9 @@ def realized_unrealized(st):
     if st.bot["position_size"] and st.bot["avg_entry"]:
         upnl = (px - st.bot["avg_entry"])*st.bot["position_size"]
     return st.bot["pnl_realized"], upnl
+
+def update_equity(st):
+    r, u = realized_unrealized(st)
+    equity = st.bot["config"].margin + r + u
+    st.equity_series.loc[len(st.equity_series)] = equity
+    return equity, r, u
