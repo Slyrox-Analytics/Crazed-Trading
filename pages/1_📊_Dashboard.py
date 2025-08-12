@@ -2,6 +2,7 @@
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 from utils import ensure_state, current_price, simulate_next_price, realized_unrealized, fetch_btc_spot_multi, push_price
+import plotly.graph_objects as go
 
 st.set_page_config(page_title="Dashboard", page_icon="📊", layout="wide")
 ensure_state(st.session_state)
@@ -35,10 +36,15 @@ with left:
 
     px = current_price(st.session_state)
     st.button(f"💸 Aktueller Kurs: **{px:,.2f}**", use_container_width=True)
-    st.line_chart(st.session_state.price_series.tail(120), y="price", height=160)
-    st.caption(f"Live-Quelle: {st.session_state.get('last_live_src', '…')}")
+
+    # Plotly sparkline (avoids CSS chunk errors)
+    y = st.session_state.price_series.tail(120)["price"]
+    fig = go.Figure(go.Scatter(y=y, mode="lines"))
+    fig.update_layout(height=160, margin=dict(l=0,r=0,t=0,b=0))
+    st.plotly_chart(fig, use_container_width=True)
 
 with right:
     r, u = realized_unrealized(st.session_state)
     st.metric("Realized PnL", f"{r:,.2f}")
     st.metric("Unrealized PnL", f"{u:,.2f}")
+st.caption(f"Live-Quelle: {st.session_state.get('last_live_src', '…')}")

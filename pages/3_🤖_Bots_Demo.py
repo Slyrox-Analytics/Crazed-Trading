@@ -25,7 +25,7 @@ cfg.range_min = c5.number_input("Range Min", min_value=10.0, value=60000.0, step
 cfg.range_max = c6.number_input("Range Max", min_value=20.0, value=64000.0, step=10.0, format="%.2f")
 cfg.step_shift = st.slider("Grid verschieben (Stepgröße)", 1.0, 1000.0, 50.0, step=1.0)
 
-# Controls
+# Controls row
 cA, cB, cC, cD, cE = st.columns([1,1,1,1,1])
 if cA.button("Start", type="primary"):
     st.session_state.bot["running"] = True
@@ -43,20 +43,24 @@ if cD.button("Grid ⬇️"):
 if cE.button("Rebuild Grid"):
     rebuild_grid_orders(st.session_state)
 
-# Live price toggle + Auto-tick
+# Live + Auto options
 t0, t1, t2, t3 = st.columns([1,1,1,2])
-use_live = t0.toggle("Echter BTC-Preis", value=True, help="Probiert mehrere Börsen (Binance, Bitstamp, Coinbase)")
-auto = t1.toggle("Auto-Tick", value=True)
-interval = t2.slider("Intervall (ms)", 800, 4000, 1500, step=100)
+use_live = t0.toggle("Echter BTC-Preis", value=True, help="Mehrere Quellen (Binance, Bitstamp, Coinbase)")
+auto = t1.toggle("Auto-Tick", value=False, help="Aktiviere Autolauf (Scroll-Sprünge möglich)")
+interval = t2.slider("Intervall (ms)", 800, 4000, 2000, step=100)
 
-# Always update price series when auto or button, even if bot not running
+# Auto-fit range around price
+f1, f2 = st.columns([1,1])
+auto_fit = f1.toggle("Range auto an Preis anpassen", value=True)
+fit_width = f2.slider("Breite um Preis (%)", 1, 15, 5)
+
+# Tick logic (always update series on auto; manual via button)
 if auto:
     st_autorefresh(interval=interval, limit=None, key="auto_tick_bot")
     if use_live:
         px_live, src = fetch_btc_spot_multi()
         new = push_price(st.session_state, px_live if px_live is not None else current_price(st.session_state))
         if px_live is not None:
-            st.session_state.last_live_ts = True
             st.session_state.last_live_src = src
     else:
         new = simulate_next_price(st.session_state, vol=0.0012)
@@ -67,14 +71,13 @@ elif t3.button("➡️ Nächster Tick (manuell)"):
         px_live, src = fetch_btc_spot_multi()
         new = push_price(st.session_state, px_live if px_live is not None else current_price(st.session_state))
         if px_live is not None:
-            st.session_state.last_live_ts = True
             st.session_state.last_live_src = src
     else:
         new = simulate_next_price(st.session_state, vol=0.0012)
     if st.session_state.bot["running"]:
         process_fills(st.session_state, new)
 
-# Metrics + sparkline
+# Metrics
 price = current_price(st.session_state)
 equity, r, u = update_equity(st.session_state)
 m1, m2, m3, m4 = st.columns(4)
@@ -82,77 +85,56 @@ m1.metric("Preis", f"{price:,.2f}")
 m2.metric("Equity (USDT)", f"{equity:,.2f}")
 m3.metric("Realized PnL", f"{r:,.2f}")
 m4.metric("Unrealized PnL", f"{u:,.2f}")
-st.line_chart(st.session_state.price_series.tail(120), y="price", height=120)
+st.caption(f"Live-Quelle: {st.session_state.get('last_live_src', '…')}")
 
-# Info badge about source
-src = st.session_state.get("last_live_src", None)
-if use_live:
-    st.caption(f"Live-Quelle: {src or '…versuche Börsen nacheinander'}")
-else:
-    st.caption("Quelle: Simulation (Random Walk)")
+# Tabs to avoid scroll jumps
+tab_chart, tab_orders, tab_logs = st.tabs(["📈 Chart", "📜 Orders", "🧾 Logs"])
 
-# Grid visibility
-with st.container():
-    left, right = st.columns([1,2])
-    sync = left.toggle("Anzeige folgt Modus", value=True)
-    if sync:
-        show_long = cfg.side in ["Long","Neutral"]
-        show_short = cfg.side in ["Short","Neutral"]
-    else:
-        cL, cS = right.columns(2)
-        show_long = cL.checkbox("Long-Grids anzeigen", value=True)
-        show_short = cS.checkbox("Short-Grids anzeigen", value=False)
+with tab_chart:
+    # Optionally auto-fit range to current price for clarity
+    if auto_fit:
+        width = max(0.0001, fit_width/100.0)
+        cfg.range_min = price*(1.0 - width)
+        cfg.range_max = price*(1.0 + width)
+        rebuild_grid_orders(st.session_state)
 
-# Chart
-levels = list(price_to_grid_levels(cfg))
-mid = (cfg.range_min + cfg.range_max) / 2.0
-long_levels = [float(L) for L in levels if L < mid] if show_long else []
-short_levels = [float(L) for L in levels if L > mid] if show_short else []
+    levels = list(price_to_grid_levels(cfg))
+    mid = (cfg.range_min + cfg.range_max) / 2.0
+    show_long = cfg.side in ["Long","Neutral"]
+    show_short = cfg.side in ["Short","Neutral"]
+    long_levels = [float(L) for L in levels if L < mid] if show_long else []
+    short_levels = [float(L) for L in levels if L > mid] if show_short else []
 
-fig = go.Figure()
-fig.add_trace(go.Scatter(
-    y=st.session_state.price_series["price"],
-    x=list(range(len(st.session_state.price_series))),
-    mode="lines",
-    name="Preis",
-    line=dict(width=2)
-))
-fig.add_hline(y=mid, line=dict(color="#aaaaaa", width=1, dash="dash"), annotation_text="Mid", annotation_position="right")
-for L in long_levels:
-    fig.add_hline(y=L, line=dict(color="#00ff88", width=1.8, dash="solid"),
-                  annotation_text="Long", annotation_position="right")
-for L in short_levels:
-    fig.add_hline(y=L, line=dict(color="#ff4d4d", width=1.8, dash="dot"),
-                  annotation_text="Short", annotation_position="right")
-fig.add_hline(y=price, line=dict(color="#ffd700", width=2.8, dash="solid"),
-              annotation_text=f"Price {price:.2f}", annotation_position="right")
+    fig = go.Figure()
+    # Sparkline + full series overlay
+    fig.add_trace(go.Scatter(
+        y=st.session_state.price_series["price"],
+        x=list(range(len(st.session_state.price_series))),
+        mode="lines",
+        name="Preis",
+        line=dict(width=2)
+    ))
+    fig.add_hline(y=mid, line=dict(color="#aaaaaa", width=1, dash="dash"), annotation_text="Mid", annotation_position="right")
+    for L in long_levels:
+        fig.add_hline(y=L, line=dict(color="#00ff88", width=1.8, dash="solid"),
+                      annotation_text="Long", annotation_position="right")
+    for L in short_levels:
+        fig.add_hline(y=L, line=dict(color="#ff4d4d", width=1.8, dash="dot"),
+                      annotation_text="Short", annotation_position="right")
+    fig.add_hline(y=price, line=dict(color="#ffd700", width=2.8, dash="solid"),
+                  annotation_text=f"Price {price:.2f}", annotation_position="right")
+    fig.update_layout(height=520, margin=dict(l=10,r=10,t=30,b=10))
+    st.plotly_chart(fig, use_container_width=True)
 
-fig.update_layout(height=470, margin=dict(l=10,r=10,t=30,b=10))
-st.plotly_chart(fig, use_container_width=True)
-
-# TP preview
-insight = insight_expected_tp_pnl(st.session_state)
-with st.expander("Nächste Grid-TP Vorschau", expanded=True):
-    if insight:
-        st.table({
-            "Avg Entry":[f"{insight['avg_entry']:.2f}"],
-            "Next TP":[f"{insight['next_tp']:.2f}"],
-            "Distance":[f"{insight['distance']:.2f}"],
-            "Qty":[f"{insight['qty']:.4f}"],
-            "Expected PnL (after fees)":[f"{insight['expected_pnl_at_tp']:.2f}"]
-        })
-    else:
-        st.info("Kein aktiver Avg Entry – warte auf den ersten Fill.")
-
-# Quick views
-with st.expander("Offene Orders", expanded=False):
+with tab_orders:
     if st.session_state.bot["open_orders"]:
         st.dataframe(st.session_state.bot["open_orders"], use_container_width=True, hide_index=True)
     else:
-        st.caption("Keine offenen Orders.")
-with st.expander("Logs", expanded=False):
+        st.info("Keine offenen Orders.")
+
+with tab_logs:
     if st.session_state.logs:
         for line in st.session_state.logs[::-1]:
             st.write("•", line)
     else:
-        st.caption("Noch keine Logs.")
+        st.info("Noch keine Logs.")
