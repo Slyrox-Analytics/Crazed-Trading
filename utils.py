@@ -103,10 +103,37 @@ def process_fills(st, new_price):
             else:
                 st.logs.append(f"Sell filled @ {exit_price:.2f}")
             to_remove.append(i)
-    # apply removals/additions
     for idx in sorted(set(to_remove), reverse=True):
         orders.pop(idx)
     orders.extend(to_add)
+
+def next_tp_target(cfg: BotConfig, entry: float):
+    levels = price_to_grid_levels(cfg)
+    level_list = list(levels)
+    idx = max(1, level_list.index(min(level_list, key=lambda x: abs(x-entry)))+1)
+    if idx < len(level_list):
+        return float(level_list[idx])
+    return None
+
+def insight_expected_tp_pnl(st):
+    """Return distance to next TP and expected pnl if we close 1 grid at that TP."""
+    cfg: BotConfig = st.bot["config"]
+    if st.bot["avg_entry"] is None:
+        return None
+    tp = next_tp_target(cfg, st.bot["avg_entry"])
+    if tp is None:
+        return None
+    qty = cfg.qty_per_order
+    pnl = (tp - st.bot["avg_entry"]) * qty
+    fee = (tp + st.bot["avg_entry"]) * qty * cfg.fee_rate
+    pnl -= fee
+    return {
+        "avg_entry": float(st.bot["avg_entry"]),
+        "next_tp": float(tp),
+        "distance": float(tp - st.bot["avg_entry"]),
+        "expected_pnl_at_tp": float(pnl),
+        "qty": float(qty)
+    }
 
 def realized_unrealized(st):
     px = current_price(st)
