@@ -27,7 +27,8 @@ def ensure_state(st):
             "trades": [],
             "pnl_realized": 0.0,
             "position_size": 0.0,
-            "avg_entry": None
+            "avg_entry": None,
+            "neutral_static": True  # default: statisch (wie Bitget manuell)
         }
     if "logs" not in st:
         st.logs = []
@@ -81,18 +82,23 @@ def push_price(st, new_price: float):
 
 # ---- Grid helpers ----
 def price_to_grid_levels(cfg: BotConfig):
-    # Arithmetisch: gleichmäßige Abstände über Range (inklusive Endpunkte)
     return np.linspace(cfg.range_min, cfg.range_max, int(cfg.grid_count))
 
-def neutral_split_levels(cfg: BotConfig, price: float):
-    """Bitget-like: Verteilung in Neutral hängt von Preisposition ab.
-    Gibt (buy_levels, sell_levels) zurück, jeweils Listen der Level-Preise.
-    """
+def neutral_split_levels(cfg: BotConfig, price: float, neutral_static: bool):
     levels = list(price_to_grid_levels(cfg))
+    if neutral_static:
+        # statisch: Long = unter Mid, Short = über Mid (Bitget manuell)
+        mid = (cfg.range_min + cfg.range_max) / 2.0
+        buy_levels = [float(L) for L in levels if L < mid]
+        sell_levels = [float(L) for L in levels if L > mid]
+        return buy_levels, sell_levels
+    # dynamisch: abhängig von Preisposition
     rng = max(1e-9, (cfg.range_max - cfg.range_min))
-    ratio = (price - cfg.range_min) / rng  # 0..1
+    ratio = (price - cfg.range_min) / rng  # 0..1 (kann >1 oder <0 sein)
     N = int(cfg.grid_count)
-    buy_count = max(1, min(N-1, round(N * ratio)))  # mindestens 1, höchstens N-1
+    # clamp auf [0,1]
+    ratio = min(1.0, max(0.0, ratio))
+    buy_count = max(1, min(N-1, round(N * ratio)))
     sell_count = N - buy_count
     levels_sorted = sorted(levels)
     buy_levels = levels_sorted[:buy_count]
@@ -112,7 +118,7 @@ def rebuild_grid_orders(st):
             if L >= (cfg.range_min + cfg.range_max)/2.0:
                 orders.append({"type":"sell_limit","price":float(L), "qty":cfg.qty_per_order})
     else:
-        buy_levels, sell_levels = neutral_split_levels(cfg, px)
+        buy_levels, sell_levels = neutral_split_levels(cfg, px, st.bot.get("neutral_static", True))
         for L in buy_levels:
             orders.append({"type":"buy_limit","price":float(L), "qty":cfg.qty_per_order})
         for L in sell_levels:
@@ -131,7 +137,6 @@ def process_fills(st, new_price):
             pe, ps, q = st.bot["avg_entry"], st.bot["position_size"]-cfg.qty_per_order, cfg.qty_per_order
             st.bot["avg_entry"] = entry if pe is None else (pe*ps + entry*q)/(ps+q)
             st.logs.append(f"Buy filled @ {entry:.2f}")
-            # TP = nächstes höheres Level
             above = [L for L in levels if L > entry]
             if above:
                 tp = min(above)
@@ -160,11 +165,9 @@ def next_tp_target(cfg: BotConfig, entry: float):
 
 def insight_expected_tp_pnl(st):
     cfg: BotConfig = st.bot["config"]
-    if st.bot["avg_entry"] is None:
-        return None
+    if st.bot["avg_entry"] is None: return None
     tp = next_tp_target(cfg, st.bot["avg_entry"])
-    if tp is None:
-        return None
+    if tp is None: return None
     q = cfg.qty_per_order
     pnl = (tp - st.bot["avg_entry"]) * q
     fee = (tp + st.bot["avg_entry"]) * q * cfg.fee_rate
@@ -185,20 +188,40 @@ def update_equity(st):
     st.equity_series.loc[len(st.equity_series)] = equity
     return equity, r, u
 
-# ---- Candles for Dashboard ----
-def fetch_binance_klines(interval="1m", limit=180):
+# ---- Candle helpers (multi-source) ----
+def fetch_binance_klines(interval="5m", limit=180):
     url = "https://api.binance.com/api/v3/klines"
+    r = requests.get(url, params={"symbol":"BTCUSDT", "interval":interval, "limit":limit}, timeout=5)
+    r.raise_for_status()
+    raw = r.json()
+    df = pd.DataFrame(raw, columns=["t","o","h","l","c","v","ct","qv","n","tb","tqv","ig"])
+    df["t"] = pd.to_datetime(df["t"], unit="ms")
+    for col in ["o","h","l","c","v"]: df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df[["t","o","h","l","c","v"]]
+
+def fetch_bitstamp_ohlc(step=300, limit=180):
+    url = "https://www.bitstamp.net/api/v2/ohlc/btcusd/"
+    r = requests.get(url, params={"step":step, "limit":limit}, timeout=5)
+    r.raise_for_status()
+    raw = r.json().get("data", {}).get("ohlc", [])
+    if not raw: return None
+    df = pd.DataFrame(raw)
+    df["t"] = pd.to_datetime(df["timestamp"].astype(int), unit="s")
+    for col in ["open","high","low","close","volume"]:
+        if col in df: df[col] = pd.to_numeric(df[col], errors="coerce")
+    df.rename(columns={"open":"o","high":"h","low":"l","close":"c","volume":"v"}, inplace=True)
+    return df[["t","o","h","l","c","v"]].sort_values("t")
+
+def fetch_candles_multi(interval="5m", limit=180):
+    # Try Binance first, then Bitstamp as fallback
+    # Map step for bitstamp
+    step_map = {"1m":60, "5m":300, "15m":900, "1h":3600}
     try:
-        r = requests.get(url, params={"symbol":"BTCUSDT", "interval":interval, "limit":limit}, timeout=5)
-        r.raise_for_status()
-        raw = r.json()
-        # Columns: [openTime, open, high, low, close, volume, closeTime, ...]
-        df = pd.DataFrame(raw, columns=[
-            "t","o","h","l","c","v","ct","qv","n","tb","tqv","ig"
-        ])
-        df["t"] = pd.to_datetime(df["t"], unit="ms")
-        for col in ["o","h","l","c","v"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-        return df[["t","o","h","l","c","v"]]
+        return fetch_binance_klines(interval, limit)
+    except Exception:
+        pass
+    try:
+        step = step_map.get(interval, 300)
+        return fetch_bitstamp_ohlc(step, limit)
     except Exception:
         return None
