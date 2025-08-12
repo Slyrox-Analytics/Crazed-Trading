@@ -40,10 +40,10 @@ if cD.button("Grid ⬇️"):
 if cE.button("Rebuild Grid"):
     rebuild_grid_orders(st.session_state)
 
-# Live / refresh & pause toggle
+# Live / refresh & pause toggle (default: PAUSE to allow scrolling)
 t0, t1, t2, t3 = st.columns([1,1,1,1])
 use_live = t0.toggle("Echter BTC-Preis", value=True)
-pause = t1.toggle("Updates pausieren", value=False, help="Deaktiviert Auto-Refresh, damit du in Ruhe scrollen kannst.")
+pause = t1.toggle("Updates pausieren", value=True, help="Standardmäßig an – so kannst du entspannt scrollen. Ausschalten für Live-Updates.")
 auto_sim = t2.toggle("Simulationsticker", value=False, help="Nur für Demo ohne Live erforderlich.")
 refresh = t3.slider("Refresh (ms)", 800, 4000, 1800, step=100)
 
@@ -85,11 +85,11 @@ with tab_chart:
     mid = (cfg.range_min + cfg.range_max) / 2.0
 
     if cfg.side == "Long":
-        long_levels = [float(L) for L in levels if L < mid]  # reiner Long unter Mid
+        long_levels = [float(L) for L in levels if L < mid]
         short_levels = []
     elif cfg.side == "Short":
         long_levels = []
-        short_levels = [float(L) for L in levels if L > mid]  # reiner Short über Mid
+        short_levels = [float(L) for L in levels if L > mid]
     else:
         buy_levels, sell_levels = neutral_split_levels(cfg, price, st.session_state.bot.get("neutral_static", True))
         long_levels = buy_levels
