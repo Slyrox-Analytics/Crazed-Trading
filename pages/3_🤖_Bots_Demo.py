@@ -11,8 +11,20 @@ from utils import (
 st.set_page_config(page_title="Bot-Demo", page_icon="🤖", layout="wide")
 ensure_state(st.session_state)
 
+# Robust scroll restore (multiple attempts after render)
+components.html('''
+<script>
+  const key = "scrollY_bot_demo";
+  const saved = parseInt(sessionStorage.getItem(key) || "0");
+  function restore() { window.scrollTo(0, saved); }
+  document.addEventListener("DOMContentLoaded", restore);
+  let tries=0; let h=setInterval(()=>{ restore(); if(++tries>10) clearInterval(h); }, 120);
+  setInterval(()=> sessionStorage.setItem(key, window.scrollY), 200);
+</script>
+''', height=0)
+
 st.markdown("## 🤖 Bot-Demo (ohne API)")
-st.caption("Erstelle einen Demo-Bot. Grid-Linien sichtbar. Range & Grids live anpassbar.")
+st.caption("Grid-Linien sichtbar. Range & Grids live anpassbar.")
 
 cfg: BotConfig = st.session_state.bot["config"]
 col1, col2, col3, col4 = st.columns(4)
@@ -26,9 +38,8 @@ cfg.range_min = c5.number_input("Range Min", min_value=10.0, value=60000.0, step
 cfg.range_max = c6.number_input("Range Max", min_value=20.0, value=64000.0, step=10.0, format="%.2f")
 cfg.step_shift = st.slider("Grid verschieben (Stepgröße)", 1.0, 1000.0, 50.0, step=1.0)
 
-# Optional: Center grid around current price
 with st.expander("⚙️ Schnell anpassen"):
-    w = st.slider("Breite um Preis (%)", 1, 20, 6, help="Spanne rund um den aktuellen Preis")
+    w = st.slider("Breite um Preis (%)", 1, 20, 8)
     if st.button("Center Grid auf Preis", use_container_width=True):
         p = current_price(st.session_state)
         span = p * (w/100)
@@ -36,13 +47,13 @@ with st.expander("⚙️ Schnell anpassen"):
         cfg.range_max = round(p + span/2, 2)
         rebuild_grid_orders(st.session_state)
         st.success("Grid um aktuellen Preis zentriert.")
+    st.markdown("[Zum Chart springen](#chart)")
 
 # Controls row
-cA, cB, cC, cD, cE, cF, cG, cH = st.columns([1,1,1,1,1,1.5,1.2,1.2])
+cA, cB, cC, cD, cE, cF, cG, cH = st.columns([1,1,1,1,1,1.4,1.2,1.2])
 if cA.button("Start", type="primary", key="start_btn"):
     st.session_state.bot["running"] = True
-    if not st.session_state.bot.get("open_orders"):
-        rebuild_grid_orders(st.session_state)
+    rebuild_grid_orders(st.session_state)
 if cB.button("Stop", key="stop_btn"):
     st.session_state.bot["running"] = False
 if cC.button("Grid ⬆️", key="grid_up"):
@@ -51,46 +62,26 @@ if cD.button("Grid ⬇️", key="grid_down"):
     d = cfg.step_shift; cfg.range_min -= d; cfg.range_max -= d; rebuild_grid_orders(st.session_state)
 if cE.button("Rebuild Grid", key="rebuild"):
     rebuild_grid_orders(st.session_state)
-# manual ticks
+
 if cF.button("⏭️ Tick (1x)", key="tick1"):
-    simulate_next_price(st.session_state, vol=0.0012); process_fills(st.session_state, current_price(st.session_state))
+    simulate_next_price(st.session_state, vol=0.0015); process_fills(st.session_state, current_price(st.session_state))
 if cG.button("⏭️ 10 Ticks", key="tick10"):
-    for _ in range(10): simulate_next_price(st.session_state, vol=0.0015); process_fills(st.session_state, current_price(st.session_state))
+    for _ in range(10): simulate_next_price(st.session_state, vol=0.002); process_fills(st.session_state, current_price(st.session_state))
 if cH.button("⏭️ 100 Ticks", key="tick100"):
-    for _ in range(100): simulate_next_price(st.session_state, vol=0.002); process_fills(st.session_state, current_price(st.session_state))
+    for _ in range(100): simulate_next_price(st.session_state, vol=0.0035); process_fills(st.session_state, current_price(st.session_state))
 
-# Live / refresh controls
-t0, t1, t2, t3, t4 = st.columns([1,1,1,1,1])
+# Live / refresh
+t0, t1, t2 = st.columns([1,1,2])
 use_live = t0.toggle("Echter BTC-Preis", value=True, key="live_toggle")
-pause = t1.toggle("Updates pausieren", value=False, help="Bei AUS wird automatisch aktualisiert.", key="pause_toggle")
-auto_sim = t2.toggle("Simulationsticker", value=False, help="Nur für Demo ohne Live erforderlich.", key="sim_toggle")
-refresh = t3.slider("Refresh (ms)", 800, 4000, 1800, step=100, key="refresh_ms")
-stick_chart = t4.toggle("Anzeige folgt Chart", value=True, help="Hält die Sicht automatisch beim Chart", key="stick_chart")
+pause = t1.toggle("Updates pausieren", value=False, help="Zum Verstellen kurz aktivieren.", key="pause_toggle")
+refresh = t2.slider("Refresh (ms)", 1200, 5000, 2500, step=100, key="refresh_ms")
 
-# --- Scroll handling (Stick to chart & restore position) ---
-components.html(f'''
-<div id="chart_anchor"></div>
-<script>
-  const key = "scrollY_bot_demo";
-  const saved = sessionStorage.getItem(key);
-  if (saved !== null) {{ window.scrollTo(0, parseInt(saved)); }}
-  setInterval(() => {{ sessionStorage.setItem(key, window.scrollY); }}, 120);
-  const stick = {str(stick_chart).lower()};
-  if (stick) {{
-     const el = document.getElementById('chart_anchor');
-     if (el) el.scrollIntoView({{behavior: "instant", block: "start"}});
-  }}
-</script>
-''', height=0)
-
-# Neutral behaviour mode
+# Neutral behaviour
 is_static = st.radio(
     "Neutral-Modus", ["Statisch (um Mid, wie Bitget manuell)","Dynamisch (preisabhängig)"],
-    index=1 if cfg.side=="Neutral" else 0, horizontal=True, key="neutral_mode_radio"
+    index=1, horizontal=True, key="neutral_mode_radio"
 ) == "Statisch (um Mid, wie Bitget manuell)"
-st.session_state.bot["neutral_static"] = is_static
 
-# status badge
 status = "RUNNING" if st.session_state.bot.get("running") else "PAUSED"
 bg = "#21c36f" if status == "RUNNING" else "#555"
 st.markdown(f'''
@@ -100,18 +91,15 @@ st.markdown(f'''
 </div>
 ''', unsafe_allow_html=True)
 
-if (use_live or auto_sim) and not pause:
+if use_live and not pause:
     st_autorefresh(interval=refresh, limit=None, key="live_refresh_key")
-    if use_live:
-        px, src = fetch_btc_spot_multi()
-        push_price(st.session_state, px if px is not None else current_price(st.session_state))
-        if px is not None: st.session_state.last_live_src = src
-    elif auto_sim:
-        simulate_next_price(st.session_state, vol=0.0012)
+    px, src = fetch_btc_spot_multi()
+    push_price(st.session_state, px if px is not None else current_price(st.session_state))
+    if px is not None: st.session_state.last_live_src = src
     if st.session_state.bot["running"]:
         process_fills(st.session_state, current_price(st.session_state))
 
-# Metrics + sparkline
+# Metrics
 price = current_price(st.session_state)
 equity, r, u = update_equity(st.session_state)
 m1, m2, m3, m4 = st.columns(4)
@@ -120,7 +108,7 @@ m2.metric("Equity (USDT)", f"{equity:,.2f}")
 m3.metric("Realized PnL", f"{r:,.2f}")
 m4.metric("Unrealized PnL", f"{u:,.2f}")
 
-y = st.session_state.price_series.tail(200)["price"]
+y = st.session_state.price_series.tail(250)["price"]
 spark = go.Figure(go.Scatter(y=y, mode="lines", line=dict(width=2)))
 spark.update_layout(height=110, margin=dict(l=0,r=0,t=0,b=0))
 st.plotly_chart(spark, use_container_width=True)
@@ -128,6 +116,7 @@ st.caption(f"Live-Quelle: {st.session_state.get('last_live_src', '…')}")
 
 tab_chart, tab_orders, tab_logs = st.tabs(["📈 Chart", "📜 Orders", "🧾 Logs"])
 with tab_chart:
+    st.markdown('<a name="chart"></a>', unsafe_allow_html=True)
     levels = list(price_to_grid_levels(cfg))
     mid = (cfg.range_min + cfg.range_max) / 2.0
 
@@ -145,7 +134,7 @@ with tab_chart:
             if len(levels) % 2 == 1:
                 mid_val = levels[len(levels)//2]
                 if abs(mid_val - mid) < eps*10 + 1e-6:
-                    base_short.append(float(mid_val))  # default mid -> Short
+                    base_short.append(float(mid_val))
             long_levels, short_levels = base_long, base_short
         else:
             buy_levels, sell_levels = neutral_split_levels(cfg, price, False)
@@ -171,14 +160,14 @@ with tab_chart:
     st.plotly_chart(fig, use_container_width=True)
 
 with tab_orders:
-    if st.session_state.bot["open_orders"]:
-        st.dataframe(st.session_state.bot["open_orders"], use_container_width=True, hide_index=True)
+    if st.session_state.bot["open_trades"]:
+        st.dataframe(st.session_state.bot["open_trades"], use_container_width=True)
     else:
-        st.info("Keine offenen Orders.")
+        st.info("Keine offenen Positionen.")
 
 with tab_logs:
     if st.session_state.logs:
-        for line in st.session_state.logs[::-1]:
+        for line in st.session_state.logs[::-1][:200]:
             st.write("•", line)
     else:
         st.info("Noch keine Logs.")
