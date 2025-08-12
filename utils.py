@@ -1,6 +1,6 @@
 
 from dataclasses import dataclass
-import pandas as pd, numpy as np, time, random
+import pandas as pd, numpy as np
 import requests
 
 QTY_PER_ORDER = 0.001  # 0.001 BTC pro Grid
@@ -42,14 +42,14 @@ def simulate_next_price(st, vol: float = 0.001):
     push_price(st, max(10.0, p + step))
 
 def fetch_btc_spot_multi():
-    # try Bitstamp
+    # Bitstamp first
     try:
         r = requests.get("https://www.bitstamp.net/api/v2/ticker/btcusd", timeout=4)
         if r.ok:
             return float(r.json()["last"]), "bitstamp"
     except Exception:
         pass
-    # try Binance
+    # Binance as fallback
     try:
         r = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT", timeout=4)
         if r.ok:
@@ -57,6 +57,23 @@ def fetch_btc_spot_multi():
     except Exception:
         pass
     return None, "offline"
+
+# Optional candles (for Dashboard fallback)
+def fetch_candles(symbol: str="BTCUSDT", interval: str="5m", limit: int=200):
+    try:
+        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+        r = requests.get(url, timeout=6)
+        r.raise_for_status()
+        data = r.json()
+        df = pd.DataFrame(data, columns=[
+            "t","o","h","l","c","v","ct","qv","n","tb","tq","ignore"
+        ])
+        df["t"] = pd.to_datetime(df["t"], unit="ms")
+        for col in ["o","h","l","c","v"]:
+            df[col] = df[col].astype(float)
+        return df[["t","o","h","l","c","v"]]
+    except Exception:
+        return None
 
 def _grid_step(cfg: BotConfig) -> float:
     if cfg.grid_count <= 1: return cfg.range_max - cfg.range_min
@@ -83,7 +100,7 @@ def neutral_split_levels(cfg: BotConfig, price: float, static: bool):
         return longs, shorts
 
 def rebuild_grid_orders(st):
-    # nur Info für UI; Orders werden virtuell über Levels berechnet
+    # nur Info; Linien werden dynamisch gezeichnet
     st.bot["open_orders"] = [{"level": float(L)} for L in price_to_grid_levels(st.bot["config"])]
     st.logs.append(f"{pd.Timestamp.utcnow()}: Grid rebuilt.")
 
@@ -129,7 +146,6 @@ def process_fills(st, price: float):
     realized = st.bot.get("realized", 0.0)
     for t in st.bot["open_trades"]:
         if t["side"] == "long":
-            # TP überschritten?
             if prev < t["tp"] <= price:
                 pnl = (t["tp"] - t["entry"]) * t["qty"] * cfg.leverage
                 realized += pnl
