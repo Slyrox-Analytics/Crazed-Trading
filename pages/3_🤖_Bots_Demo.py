@@ -1,102 +1,97 @@
-# pages/3_🤖_Bots_Demo.py
+# pages/3_Bots_Demo.py
 from __future__ import annotations
-import time, pandas as pd
+import random
 import plotly.graph_objects as go
 import streamlit as st
-from streamlit.components.v1 import html
+from streamlit_autorefresh import st_autorefresh
+
 from utils import (
-    ensure_state, current_price, simulate_next_price, fetch_btc_spot_multi,
-    push_price, process_fills, update_equity, build_grid, force_cross
+    ensure_state, rebuild_grid, process_tick,
+    update_equity, current_price
 )
+from utils import push_price  # falls du manuell Preise testen willst
+from utils import realized_unrealized
 
 st.set_page_config(page_title="Bot-Demo", page_icon="🤖", layout="wide")
 ensure_state(st.session_state)
+bot = st.session_state.bot
 
-# Scroll-Fix
-html("""
-<script>
-(function(){
- const KEY='ct_bot_scrollY'; const y=sessionStorage.getItem(KEY);
- if(y){window.scrollTo(0, parseFloat(y));}
- let t; window.addEventListener('scroll', ()=>{ clearTimeout(t); t=setTimeout(()=>sessionStorage.setItem(KEY, window.scrollY),100);});
-})();
-</script>
-""", height=0)
+st.markdown("## Bot-Demo (ohne API)")
+left, right = st.columns([3,2])
 
-st.markdown("## 🤖 Bot-Demo (ohne API)")
+# ----------- Setup -----------
+with left:
+    c1, c2, c3 = st.columns(3)
+    bot.range_min = c1.number_input("Range Min", value=float(bot.range_min), step=100.0, format="%.2f")
+    bot.range_max = c2.number_input("Range Max", value=float(bot.range_max), step=100.0, format="%.2f")
+    bot.n_grids   = int(c3.slider("Grids", 4, 60, int(bot.n_grids)))
+    bot.qty_per_order = st.slider("Qty pro Grid (BTC, Demo)", 0.0005, 0.01, float(bot.qty_per_order), step=0.0005)
+    bot.mode = st.radio("Neutral-Modus", ["dynamic","static"], horizontal=True, index=0 if bot.mode=="dynamic" else 1)
 
-# Parameter
-c1,c2,c3 = st.columns(3)
-mode = c1.selectbox("Richtung", ["Neutral","Long","Short"], index=0).lower()
-st.session_state.bot["mode"]=mode
-c2.number_input("Margin (USDT)", 1000.0, value=100000.0, step=1000.0)
-c3.slider("Grids", 4, 60, int(st.session_state.bot.get("grids",12)), key="grids_ui")
+    # Buttons
+    b1, b2, b3, b4 = st.columns(4)
+    if b1.button("Start", use_container_width=True): bot.running = True
+    if b2.button("Stop",  use_container_width=True): bot.running = False
+    if b3.button("Grid ⬆",use_container_width=True):  # preisnahe Grenzen verschieben
+        bot.range_min += 50; bot.range_max += 50; rebuild_grid(bot, price=current_price(st.session_state))
+    if b4.button("Grid ⬇",use_container_width=True):
+        bot.range_min -= 50; bot.range_max -= 50; rebuild_grid(bot, price=current_price(st.session_state))
 
-r1,r2 = st.columns(2)
-st.session_state.bot["range_min"] = r1.number_input("Range Min", value=float(st.session_state.bot["range_min"]), step=50.0, format="%.2f")
-st.session_state.bot["range_max"] = r2.number_input("Range Max", value=float(st.session_state.bot["range_max"]), step=50.0, format="%.2f")
-st.session_state.bot["grids"] = int(st.session_state.grids_ui)
-build_grid(st.session_state.bot)
+    if st.button("Rebuild Grid (neu)"):
+        rebuild_grid(bot, price=current_price(st.session_state))
 
-st.markdown("### Aktionen")
-a1,a2,a3,a4,a5,a6 = st.columns(6)
-if a1.button("Start", type="primary"): st.session_state.bot["running"]=True
-if a2.button("Stop"): st.session_state.bot["running"]=False
-if a3.button("Grid ⬆"): st.session_state.bot["grids"]=min(60,st.session_state.bot["grids"]+1); build_grid(st.session_state.bot)
-if a4.button("Grid ⬇"): st.session_state.bot["grids"]=max(4,st.session_state.bot["grids"]-1); build_grid(st.session_state.bot)
-if a5.button("Rebuild Grid"): build_grid(st.session_state.bot)
-if a6.button("⚡ Force Cross (Demo-PnL)"): force_cross(st.session_state)
+with right:
+    refresh = st.slider("Refresh (ms)", 1200, 5000, 2500, step=100)
+    soft_auto = st.toggle("Auto-Update (soft)", value=False)
+    if soft_auto and bot.running:
+        st_autorefresh(interval=refresh, key="bot_soft_tick")
 
-b1,b2 = st.columns(2)
-use_live = b1.toggle("Echter BTC-Preis", value=True)
-auto_soft = b2.toggle("Auto-Update (soft)", value=True)
-speed = st.slider("Refresh (ms)", 1200, 5000, 2500, step=100)
+# ----------- Kurs beschaffen / ticken -----------
+# DU HAST BEREITS DEINEN Live-Feed: wenn du ihn nutzen willst,
+# ruf process_tick(st, live_price) auf. Hier gibt's eine sehr
+# kleine Demo-Bewegung per Zufall, falls kein Live-Feed aktiv ist.
+if bot.running:
+    # kleiner Random-Walk um die reale Preisspur nicht zu zerstören
+    last = current_price(st.session_state)
+    demo = last + random.uniform(-40, 40)
+    process_tick(st.session_state, demo)
 
-status = "RUNNING" if st.session_state.bot.get("running") else "STOPPED"
-(st.success if status=="RUNNING" else st.warning)(f"Status: {status}")
-
-# Ticks
-loops = 20 if auto_soft else 1
-for _ in range(loops):
-    if use_live:
-        px, src = fetch_btc_spot_multi()
-        if px is not None:
-            push_price(st.session_state, px); st.session_state.last_live_src=src
-        else:
-            simulate_next_price(st.session_state)
-    else:
-        simulate_next_price(st.session_state)
-    if st.session_state.bot.get("running"):
-        process_fills(st.session_state, current_price(st.session_state))
-    if loops>1: time.sleep(speed/1000.0)
-
-# KPIs
+# ----------- KPIs -----------
 p = current_price(st.session_state)
-equity, realized, unrealized = update_equity(st.session_state)
-k1,k2,k3,k4 = st.columns(4)
-k1.metric("Preis", f"{p:,.2f}")
-k2.metric("Equity (USDT)", f"{equity:,.2f}")
-k3.metric("Realized PnL", f"{realized:,.2f}")
-k4.metric("Unrealized PnL", f"{unrealized:,.2f}")
-st.caption(f"Live-Quelle: {st.session_state.get('last_live_src','bitstamp')}")
+eq, R, U = update_equity(st.session_state)
+top1, top2, top3 = st.columns(3)
+top1.metric("Preis", f"{p:,.2f}")
+top2.metric("Equity (USDT)", f"{eq:,.2f}")
+top3.metric("Realized PnL",  f"{R:,.2f}")
+st.metric("Unrealized PnL", f"{U:,.2f}")
 
-# Chart
-def grid_fig():
-    df = st.session_state.price_series.tail(240)
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df["ts"], y=df["price"], mode="lines", name="Preis", line=dict(width=2)))
-    for lv in st.session_state.bot["grid"]["long"]:
-        fig.add_hline(y=lv, line=dict(color="#00e676", width=1.5))
-    for lv in st.session_state.bot["grid"]["short"]:
-        fig.add_hline(y=lv, line=dict(color="#ff5252", width=1.5, dash="dot"))
-    mid=(st.session_state.bot["range_min"]+st.session_state.bot["range_max"])/2
-    fig.add_hline(y=mid, line=dict(color="#ffde59", width=2))
-    fig.update_layout(height=420, margin=dict(l=8,r=8,t=4,b=4), legend=dict(orientation="h"))
-    return fig
-st.plotly_chart(grid_fig(), use_container_width=True)
+# ----------- Chart ----------
+ps = bot.price_series.tail(800)
+fig = go.Figure()
+fig.add_trace(go.Scatter(x=ps["ts"], y=ps["price"], name="Preis", mode="lines", line=dict(width=2)))
 
-t1,t2 = st.tabs(["📋 Orders", "✅ Fills / Logs"])
-with t1:
-    st.dataframe(pd.DataFrame(st.session_state.orders).tail(150), use_container_width=True, height=260)
-with t2:
-    st.dataframe(pd.DataFrame(st.session_state.fills).tail(150), use_container_width=True, height=300)
+# Grid-Linien
+for lvl, side in bot.grids:
+    fig.add_hline(
+        y=lvl,
+        line_color="#00c853" if side=="long" else "#ff5252",
+        line_dash="solid" if side=="long" else "dot",
+        opacity=0.9
+    )
+
+# aktuelle Mid-Linie
+mid = (bot.range_min + bot.range_max)/2
+fig.add_hline(y=mid, line_color="#ffd54f", opacity=0.6, name="Mid")
+
+fig.update_layout(height=420, margin=dict(l=10,r=10,t=10,b=10), showlegend=False)
+st.plotly_chart(fig, use_container_width=True)
+
+# ----------- Trades/Logs ----------
+with st.expander("Trades (Demo-Fills)"):
+    if bot.trades:
+        st.dataframe(
+            pd.DataFrame([t.__dict__ for t in bot.trades])[["ts","price","side","qty","realized"]],
+            use_container_width=True, height=240
+        )
+    else:
+        st.info("Noch keine Fills.")
