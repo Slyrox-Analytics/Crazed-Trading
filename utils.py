@@ -1,197 +1,159 @@
 # utils.py
 from __future__ import annotations
+import time
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import List, Tuple, Optional
-import json, urllib.request, math
-import numpy as np
+from typing import List, Literal, Tuple
 import pandas as pd
+import numpy as np
 
-# ------------------------------------------------------------
-# State
-# ------------------------------------------------------------
+Side = Literal["long", "short"]
+
+# ---------- Bot-Datenmodell ----------
+@dataclass
+class Trade:
+    ts: float
+    price: float
+    side: Side
+    qty: float
+    realized: float
+
+@dataclass
+class BotState:
+    # Markt
+    last_price: float = 120000.0
+    price_series: pd.DataFrame = field(default_factory=lambda: pd.DataFrame(
+        {"ts":[time.time()], "price":[120000.0]}
+    ))
+
+    # Grid-Setup
+    range_min: float = 115000.0
+    range_max: float = 123000.0
+    n_grids: int = 12
+    mode: Literal["static", "dynamic"] = "dynamic"  # dynamic = um Preis herum
+
+    # Orders
+    qty_per_order: float = 0.001  # BTC pro Fill (Demo)
+    grids: List[Tuple[float, Side]] = field(default_factory=list)  # (level, side)
+
+    # Position
+    pos_qty: float = 0.0          # >0 long, <0 short (in BTC)
+    pos_avg: float = 0.0          # durchschnittlicher Entry
+    realized: float = 0.0         # USDT
+    unrealized: float = 0.0       # USDT
+
+    # Laufstatus
+    running: bool = False
+    trades: List[Trade] = field(default_factory=list)
+
 def ensure_state(st):
-    if "price_series" not in st:
-        st.price_series = pd.DataFrame([{"ts": pd.Timestamp.utcnow(), "price": 62000.0}])
     if "bot" not in st:
-        st.bot = {
-            "running": False,
-            "mode": "neutral",
-            "range_min": 60000.0,
-            "range_max": 64000.0,
-            "grids": 12,
-            "qty": 0.001,
-            "grid": {"long": [], "short": []},
-            "long_open": {},
-            "short_open": {},
-            "realized_pnl": 0.0,
-            "unrealized_pnl": 0.0,
-        }
-    if "orders" not in st:
-        st.orders = []
-    if "fills" not in st:
-        st.fills = []
+        st.bot = BotState()
+        rebuild_grid(st.bot, price=st.bot.last_price)
 
-# ------------------------------------------------------------
-# Preis
-# ------------------------------------------------------------
-def current_price(st) -> float:
-    return float(st.price_series["price"].iloc[-1])
-
+# ---------- Preis / Kurs-Feed ----------
 def push_price(st, price: float):
-    st.price_series = pd.concat(
-        [st.price_series, pd.DataFrame([{"ts": pd.Timestamp.utcnow(), "price": float(price)}])],
-        ignore_index=True,
+    st.bot.last_price = float(price)
+    st.bot.price_series = pd.concat(
+        [st.bot.price_series, pd.DataFrame({"ts":[time.time()], "price":[price]})],
+        ignore_index=True
     )
-    if len(st.price_series) > 1200:
-        st.price_series = st.price_series.tail(1200).reset_index(drop=True)
+    _update_unrealized(st.bot)
 
-def _fetch_json(url: str) -> Optional[dict]:
-    try:
-        with urllib.request.urlopen(url, timeout=3) as r:
-            return json.loads(r.read().decode("utf-8"))
-    except Exception:
-        return None
+def current_price(st) -> float:
+    return float(st.bot.last_price)
 
-def fetch_btc_spot_multi() -> Tuple[Optional[float], str]:
-    j = _fetch_json("https://www.bitstamp.net/api/v2/ticker/btcusd")
-    if j and "last" in j:
-        try:
-            return float(j["last"]), "bitstamp"
-        except Exception:
-            pass
-    j = _fetch_json("https://api.kraken.com/0/public/Ticker?pair=BTCUSD")
-    try:
-        p = float(j["result"]["XXBTZUSD"]["c"][0])
-        return p, "kraken"
-    except Exception:
-        pass
-    return None, "none"
+# ---------- Grid bauen ----------
+def rebuild_grid(bot: BotState, price: float | None = None):
+    if price is None:
+        price = bot.last_price
 
-# ------------------------------------------------------------
-# Grid
-# ------------------------------------------------------------
-def build_grid(bot: dict):
-    mn = float(bot["range_min"]); mx = float(bot["range_max"])
-    n = max(4, min(60, int(bot["grids"])))
-    if mx <= mn: mx = mn + 100.0
-    step = (mx - mn) / n
-    levels = [mn + i * step for i in range(1, n)]  # 1..n-1
-    mid = (mn + mx) / 2.0
-    long_lvls = [x for x in levels if x <= mid]
-    short_lvls = [x for x in levels if x > mid]
-    long_lvls.sort(); short_lvls.sort()
-    bot["grid"] = {"long": long_lvls, "short": short_lvls}
+    lo, hi = float(bot.range_min), float(bot.range_max)
+    n = int(bot.n_grids)
 
-def grid_step(bot: dict) -> float:
-    n = max(4, min(60, int(bot["grids"])))
-    return (float(bot["range_max"]) - float(bot["range_min"])) / n
+    # Aufteilung long (unter Mid) / short (über Mid) – ungleichmäßig erlaubt
+    mid = price if bot.mode == "dynamic" else (lo + hi) / 2.0
+    below = [x for x in np.linspace(lo, mid, n, endpoint=False)]
+    above = [x for x in np.linspace(mid, hi, n, endpoint=False)][1:]  # mid nicht doppelt
 
-# ------------------------------------------------------------
-# Demo-Preisbewegung (an Gridbreite gekoppelt)
-# ------------------------------------------------------------
-def simulate_next_price(st):
-    p = current_price(st)
+    longs  = [(lvl, "long") for lvl in below if lvl < mid]
+    shorts = [(lvl, "short") for lvl in above if lvl > mid]
+    bot.grids = longs + shorts
+
+def _crossed(prev: float, now: float, level: float, side: Side) -> bool:
+    if side == "long":   # Kauf, wenn Preis von oben nach unten über level
+        return prev > level and now <= level
+    else:                # Verkauf, wenn Preis von unten nach oben über level
+        return prev < level and now >= level
+
+def _fill(bot: BotState, level: float, side: Side):
+    px  = float(level)
+    qty = bot.qty_per_order if side == "long" else -bot.qty_per_order
+    new_pos = bot.pos_qty + qty
+
+    # Realized PnL bei Positionsreduktion/Flip
+    realized = 0.0
+    if bot.pos_qty != 0.0 and np.sign(bot.pos_qty) != np.sign(new_pos):
+        # kompletter Flip -> erst schließen
+        close_qty = -bot.pos_qty
+        if bot.pos_qty > 0:  # long schließen -> (px - avg) * qty
+            realized += (px - bot.pos_avg) * abs(close_qty)
+        else:                # short schließen -> (avg - px) * qty
+            realized += (bot.pos_avg - px) * abs(close_qty)
+
+    elif abs(new_pos) < abs(bot.pos_qty):
+        # Teil-Schließung
+        close_qty = qty if np.sign(qty) != np.sign(bot.pos_qty) else 0.0
+        if close_qty != 0.0:
+            if bot.pos_qty > 0:
+                realized += (px - bot.pos_avg) * abs(close_qty)
+            else:
+                realized += (bot.pos_avg - px) * abs(close_qty)
+
+    # Avg neu berechnen, wenn wir in gleiche Richtung addieren
+    if np.sign(new_pos) == np.sign(bot.pos_qty) or bot.pos_qty == 0.0:
+        total_notional = bot.pos_avg * abs(bot.pos_qty) + px * abs(qty)
+        bot.pos_qty = new_pos
+        bot.pos_avg = 0.0 if bot.pos_qty == 0 else total_notional / abs(bot.pos_qty)
+    else:
+        # wir haben reduziert / geflippt
+        bot.pos_qty = new_pos
+        if bot.pos_qty == 0:
+            bot.pos_avg = 0.0
+        # bei Flip bleibt avg = px der Restposition
+        else:
+            bot.pos_avg = px
+
+    bot.realized += realized
+    bot.trades.append(Trade(time.time(), px, side, abs(qty), realized))
+    _update_unrealized(bot)
+
+def _update_unrealized(bot: BotState):
+    px = bot.last_price
+    if bot.pos_qty > 0:
+        bot.unrealized = (px - bot.pos_avg) * abs(bot.pos_qty)
+    elif bot.pos_qty < 0:
+        bot.unrealized = (bot.pos_avg - px) * abs(bot.pos_qty)
+    else:
+        bot.unrealized = 0.0
+
+# ---------- Tick-Logik ----------
+def process_tick(st, new_price: float):
     bot = st.bot
-    step_abs = max(10.0, grid_step(bot))        # absoluter Grid-Abstand in $
-    # vol ≈ 0.8 Gridbreiten (damit es regelmäßig Linien kreuzt)
-    target = 0.8 * step_abs
-    move = np.random.normal(0, target)
-    push_price(st, max(10.0, p + move))
+    prev = float(bot.last_price)
+    push_price(st, new_price)  # aktualisiert last_price + chart
+    now = float(bot.last_price)
 
-# ------------------------------------------------------------
-# Fill-Engine
-# ------------------------------------------------------------
-def _prev_curr(st) -> Tuple[float, float]:
-    if len(st.price_series) < 2:
-        p = current_price(st)
-        return p, p
-    prev = float(st.price_series["price"].iloc[-2])
-    curr = float(st.price_series["price"].iloc[-1])
-    return prev, curr
+    # multi-cross sicher behandeln (bei großen Sprüngen)
+    for level, side in bot.grids:
+        if _crossed(prev, now, level, side):
+            _fill(bot, level, side)
 
-def _next_above(levels: List[float], x: float) -> Optional[float]:
-    for lv in levels:
-        if lv > x:
-            return lv
-    return None
+# ---------- PnL/Equity für Anzeigen ----------
+def realized_unrealized(st):
+    return float(st.bot.realized), float(st.bot.unrealized)
 
-def _next_below(levels: List[float], x: float) -> Optional[float]:
-    for lv in reversed(levels):
-        if lv < x:
-            return lv
-    return None
-
-def process_fills(st, price: float):
-    bot = st.bot
-    if not bot.get("running"): return
-    long_lvls = bot["grid"]["long"]; short_lvls = bot["grid"]["short"]
-    qty = float(bot.get("qty", 0.001))
-    prev, curr = _prev_curr(st)
-
-    # LONG open (down-cross)
-    for lv in long_lvls:
-        if prev > lv >= curr and lv not in bot["long_open"]:
-            bot["long_open"][lv] = lv
-            st.orders.append({"side": "BUY", "level": lv, "status": "filled", "ts": datetime.utcnow().isoformat()})
-
-    # LONG close (up-cross nächstes Level)
-    all_lvls = sorted(long_lvls + short_lvls)
-    for entry_lv in list(bot["long_open"].keys()):
-        tp_lv = _next_above(all_lvls, entry_lv) or entry_lv + grid_step(bot)
-        if prev < tp_lv <= curr:
-            entry = bot["long_open"].pop(entry_lv)
-            pnl = (tp_lv - entry) * qty
-            bot["realized_pnl"] += pnl
-            st.fills.append({"side": "LONG", "entry": round(entry,2), "exit": round(tp_lv,2),
-                             "qty": qty, "pnl": round(pnl,2), "ts": datetime.utcnow().isoformat()})
-
-    # SHORT open (up-cross)
-    for lv in short_lvls:
-        if prev < lv <= curr and lv not in bot["short_open"]:
-            bot["short_open"][lv] = lv
-            st.orders.append({"side": "SELL", "level": lv, "status": "filled", "ts": datetime.utcnow().isoformat()})
-
-    # SHORT close (down-cross nächstes Level)
-    for entry_lv in list(bot["short_open"].keys()):
-        tp_lv = _next_below(all_lvls, entry_lv) or entry_lv - grid_step(bot)
-        if prev > tp_lv >= curr:
-            entry = bot["short_open"].pop(entry_lv)
-            pnl = (entry - tp_lv) * qty
-            bot["realized_pnl"] += pnl
-            st.fills.append({"side": "SHORT", "entry": round(entry,2), "exit": round(tp_lv,2),
-                             "qty": qty, "pnl": round(pnl,2), "ts": datetime.utcnow().isoformat()})
-
-    # Unrealized grob
-    u = 0.0
-    c = current_price(st)
-    for entry in bot["long_open"].values():
-        u += (c - entry) * qty
-    for entry in bot["short_open"].values():
-        u += (entry - c) * qty
-    bot["unrealized_pnl"] = float(u)
-
-def update_equity(st) -> Tuple[float, float, float]:
-    base = 100_000.0
-    r = float(st.bot.get("realized_pnl", 0.0))
-    u = float(st.bot.get("unrealized_pnl", 0.0))
-    return base + r + u, r, u
-
-# ------------------------------------------------------------
-# Garantierter Roundtrip
-# ------------------------------------------------------------
-def force_cross(st):
-    bot = st.bot
-    p = current_price(st)
-    lvls = sorted(bot["grid"]["long"] + bot["grid"]["short"])
-    if not lvls:
-        return
-    # näheste Linie und deren Nachbar ermitteln
-    nearest = min(lvls, key=lambda x: abs(x - p))
-    idx = lvls.index(nearest)
-    step_abs = max(5.0, grid_step(bot))
-    # erst klar darunter, dann klar über die nächste Linie → öffnet & schließt
-    down = nearest - 0.6*step_abs
-    up   = (lvls[min(idx+1, len(lvls)-1)] + 0.6*step_abs)
-    push_price(st, down); process_fills(st, down)
-    push_price(st, up);   process_fills(st, up)
+def update_equity(st):
+    # Equity = Start-Equity 100k + Realized + Unrealized (reiner Demo-Wert)
+    base = 100000.0
+    R, U = realized_unrealized(st)
+    return base + R + U, R, U
