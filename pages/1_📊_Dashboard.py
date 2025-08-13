@@ -1,58 +1,86 @@
+# pages/1_Dashboard.py
+# Build v23 – große/flexible TradingView-Einbettung, Autorefresh (optional)
 
+import time
 import streamlit as st
 import plotly.graph_objects as go
 from streamlit.components.v1 import html
-from utils import ensure_state, current_price, fetch_btc_spot_multi, push_price, update_equity
+
+# --- erwartete utils ---
+try:
+    from utils import (
+        ensure_state, current_price, fetch_btc_spot_multi,
+        push_price, update_equity
+    )
+except Exception as e:
+    st.error(
+        "Konnte aus utils nicht alles importieren. Erwartet: "
+        "ensure_state, current_price, fetch_btc_spot_multi, push_price, update_equity\n\n"
+        f"Fehler: {e}"
+    )
+    st.stop()
+
+# Autorefresh ist optional (falls Paket installiert)
+try:
+    from streamlit_autorefresh import st_autorefresh
+except Exception:
+    st_autorefresh = None
 
 st.set_page_config(page_title="Dashboard", page_icon="📊", layout="wide")
 ensure_state(st.session_state)
 
-st.markdown("# Dashboard")
-st.caption("Aktueller Kurs & PnL-Übersicht. Echtpreis optional (mehrere Quellen).")
+BUILD_TAG = "v23"
 
-row1 = st.columns(2)
-use_live = row1[0].toggle("Echter BTC-Preis", value=True)
-auto = row1[1].toggle("Auto-Refresh", value=True)
+st.markdown(f"### Dashboard — Build: `{BUILD_TAG}`")
+st.caption("Aktueller Kurs & PnL-Übersicht. Echtpreis (mehrere Quellen) + TradingView-Chart.")
 
-ms = st.slider("Refresh (ms)", 1200, 5000, 2000, step=100)
+# --- Steuerung oben ---
+c1, c2 = st.columns(2)
+use_live = c1.toggle("Echter BTC-Preis", value=True)
+auto     = c2.toggle("Auto-Refresh", value=True)
+ms       = st.slider("Refresh (ms)", 1200, 5000, 2000, step=100)
 
+# Optionaler Autorefresh über Paket, falls vorhanden
+if auto and st_autorefresh is not None:
+    st_autorefresh(interval=ms, key="dash_autorefresh_v23")
+
+# --- Preis-Update (einmal pro Run) ---
+if use_live:
+    px, src = fetch_btc_spot_multi()
+    if px is not None:
+        push_price(st.session_state, px)
+        st.session_state.last_live_src = src
+
+# Equity/PnL berechnen + aktuellem Preis
+equity, realized, unrealized = update_equity(st.session_state)
+price = current_price(st.session_state)
+
+# --- obere Metriken + Sparkline ---
+c_left, c_r1, c_r2 = st.columns([2, 1, 1])
+with c_left:
+    st.info(f"🔌 Live-Quelle: **{st.session_state.get('last_live_src', '…')}**")
+    y = st.session_state.price_series.tail(200)["price"]
+    fig = go.Figure(go.Scatter(y=y, mode="lines"))
+    fig.update_layout(height=220, margin=dict(l=10, r=10, t=10, b=10))
+    st.plotly_chart(fig, use_container_width=True)
+with c_r1:
+    st.metric("Realized PnL", f"{realized:,.2f}")
+with c_r2:
+    st.metric("Unrealized PnL", f"{unrealized:,.2f}")
+
+# --- TradingView-Chart ---
 st.markdown("### TradingView-Chart (Beta)")
+
 tv_on = st.toggle("Chart anzeigen", value=True)
-cc1, cc2, cc3, cc4 = st.columns([2,1,1,1])
-symbol = cc1.text_input("Symbol", value="BINANCE:BTCUSDT")
-tf = cc2.selectbox("Timeframe", ["1","3","5","15","30","60","120","240","D","W"], index=2)
-h = cc3.slider("Höhe (px)", 300, 1200, 680, step=10)
-full = cc4.toggle("Fullscreen-Höhe (75vh)", value=False)
+cl1, cl2, cl3, cl4 = st.columns([2, 1, 1, 1])
+symbol = cl1.text_input("Symbol", value="BINANCE:BTCUSDT")
+tf     = cl2.selectbox("Timeframe", ["1","3","5","15","30","60","120","240","D","W"], index=2)
+height = cl3.slider("Höhe (px)", 300, 1200, 720, step=20)
+fullscreen = cl4.toggle("Fullscreen (75vh)", value=False)
 
-placeholder = st.empty()
-loops = 1 if not auto else 8
-
-for _ in range(loops):
-    if use_live:
-        px, src = fetch_btc_spot_multi()
-        if px is not None:
-            push_price(st.session_state, px)
-            st.session_state.last_live_src = src
-
-    eq, r, u = update_equity(st.session_state)
-    p = current_price(st.session_state)
-
-    with placeholder.container():
-        m1, m2, m3 = st.columns([2,1,1])
-        with m1:
-            st.info(f"🔌 Live-Quelle: **{st.session_state.get('last_live_src','…')}**")
-            y = st.session_state.price_series.tail(180)["price"]
-            fig = go.Figure(go.Scatter(y=y, mode="lines"))
-            fig.update_layout(height=220, margin=dict(l=10,r=10,t=10,b=10))
-            st.plotly_chart(fig, use_container_width=True)
-        with m2:
-            st.metric("Realized PnL", f"{r:,.2f}")
-        with m3:
-            st.metric("Unrealized PnL", f"{u:,.2f}")
-
-        if tv_on:
-            height_css = "75vh" if full else f"{h}px"
-            tv = f'''
+if tv_on:
+    height_css = "75vh" if fullscreen else f"{height}px"
+    tv = f"""
 <div class="tradingview-widget-container" style="height:{height_css};">
   <div id="tvchart" style="height:{height_css};"></div>
   <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
@@ -65,16 +93,9 @@ for _ in range(loops):
       "theme": "dark",
       "style": "1",
       "locale": "de_DE",
-      "hide_top_toolbar": false,
-      "hide_legend": false,
-      "save_image": false,
       "container_id": "tvchart"
     }});
   </script>
 </div>
-'''
-            html(tv, height=0, scrolling=False)
-
-    import time
-    if auto:
-        time.sleep(ms/1000.0)
+"""
+    html(tv, height=0, scrolling=False)
